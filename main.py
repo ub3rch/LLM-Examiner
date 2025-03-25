@@ -68,7 +68,7 @@ def delete_user(username: str):
 # Constants
 SECRET_KEY = "3764ccba1f70d7d904f403d4c16eca09a27e8aadf9427969546a9d95af3467a3"
 ALGORITHM = "HS256"
-ACESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 # Data models
 class Token(BaseModel):
@@ -84,12 +84,21 @@ auth = OAuth2PasswordBearer(tokenUrl="auth")
 
 # Authorization operations
 def authenticate_user(username: str, password: str):
-    user = users.document(username)
-    if not user.get().exists:
+    user_ref = users.document(username)
+    user_doc = user_ref.get()
+    
+    if not user_doc.exists:
         return False
-    if not pwd_context.verify(password, user.hashed_password):
+    
+    # Получаем данные пользователя из документа
+    user_data = user_doc.to_dict()
+    
+    # Проверяем пароль
+    if not pwd_context.verify(password, user_data.get("hashed_password")):
         return False
-    return user
+    
+    # Возвращаем объект пользователя
+    return UserInDB(**user_data)
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
