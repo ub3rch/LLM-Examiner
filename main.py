@@ -2,10 +2,14 @@
 
 # Types
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
-from pydantic import BaseModel
+from typing import Annotated, Any
+from pydantic import BaseModel, Field
 from enum import Enum
 from fastapi import Depends
+from fastapi.responses import JSONResponse
+
+# Database
+from google.cloud import firestore
 
 # Security
 import jwt
@@ -18,22 +22,55 @@ from fastapi import FastAPI, HTTPException, status
 
 
 
-# Database operations section
-from google.cloud import firestore
-db = firestore.Client.from_service_account_json('./serviceAccountKey.json')
+# Database section
 
-def get_user(db, username: str):
-    if username in db:
-        user_dict = db[username]
-        return UserInDB(**user_dict)
+# Data models
+class User(BaseModel):
+    username: str
+
+class UserInDB(User):
+    hashed_password: str
+
+# DB initialization
+database = firestore.Client.from_service_account_json('./serviceAccountKey.json')
+users = database.collection("Users")
+
+# TODO: exceptions for database
+# DB operations
+def create_user(user_info: UserInDB):
+    user = users.document(user_info.username)
+    if user.get().exists:
+        raise HTTPException(status_code=400, detail="User exists")
+    user.set(user_info)
+
+def get_user(username: str):
+    user = users.document(username)
+    if not user.get().exists:
+        raise HTTPException(status_code=404, detail="User does not exist")
+    return user.get()
+
+def update_user(user_info: UserInDB):
+    user = users.document(user_info.username)
+    if not user.get().exists:
+        raise HTTPException(status_code=404, detail="User does not exist")
+    user.update(user_info)
+
+def delete_user(username: str):
+    user = users.document(username)
+    if not user.get().exists:
+        raise HTTPException(status_code=404, detail="User does not exist")
+    user.delete()
 
 
 
 # Authentication section
+
+# Constants
 SECRET_KEY = "3764ccba1f70d7d904f403d4c16eca09a27e8aadf9427969546a9d95af3467a3"
 ALGORITHM = "HS256"
-ACESS_TOKEN_EXPIRE_MINUTES = 60
+ACESS_TOKEN_EXPIRE_MINUTES = 30
 
+# Data models
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -41,19 +78,14 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     username: str
 
-class User(BaseModel):
-    username: str
-    email: str | None = None
-
-class UserInDB(User):
-    hashed_password: str
-
+# Authorization utilities
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 auth = OAuth2PasswordBearer(tokenUrl="auth")
 
-def authenticate_user(db, username: str, password: str):
-    user = get_user(db, username)
-    if not user:
+# Authorization operations
+def authenticate_user(username: str, password: str):
+    user = users.document(username)
+    if not user.get().exists:
         return False
     if not pwd_context.verify(password, user.hashed_password):
         return False
@@ -108,12 +140,12 @@ tags_metadata = [
         "description": "Operations with files",
     }, {
         "name": Tag.llm,
-        "description": "Operations with lLM",
+        "description": "Operations with LLM",
     }
 ]
 
 
-# Application description
+# Application description and TODO list
 description = """
 ## Users
 
@@ -123,7 +155,6 @@ User account operations:
 * **Create account** (_not implemented_)
 * **Update account** (_not implemented_)
 * **Delete account** (_not implemented_)
-
 * **Study material** (_not implemented_)
 * **Try to pass assesment for material** (_not implemented_)
 
@@ -159,14 +190,14 @@ app=FastAPI(
 
 
 
-# Implementation section
+# Calls section
 
 # User authentication
-@app.post("/token", tags=[Tag.user])
+@app.post("/auth", tags=[Tag.user])
 async def log_in(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
 ) -> Token:
-    user = authenticate_user(db, form_data.username, form_data.password)
+    user = authenticate_user(form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -181,51 +212,70 @@ async def log_in(
 
 
 # User account operations
-@app.get("/user", tags=[Tag.user])
-def user_info(): return 0
+@app.get("/user", tags=[Tag.user], response_model=User)
+def user_info():
+    return
 
-@app.post("/user", tags=[Tag.user])
-def register_user(): return 0
+@app.post("/user", dependencies=[], tags=[Tag.user])
+def register_user(user_info: UserInDB):
+    user = users.document(user_info.username)
+    if user.get().exists:
+        raise HTTPException(status_code=402, detail="User with such login exists")
+    user_info.hashed_password = pwd_context.hash(user_info.hashed_password)
+    user.set(user_info.model_dump())
 
-@app.patch("/user", tags=[Tag.user])
-def update_user(): return 0
+@app.patch("/user", dependencies=[], tags=[Tag.user])
+def update_user():
+    return 0
 
 @app.delete("/user", tags=[Tag.user])
-def delete_user(): return 0
+def delete_user():
+    return 0
 
 @app.get("/user/{file_id}", tags=[Tag.user])
-def receive_material(): return 0
+def receive_material():
+    return 0
 
 @app.post("/user/{file_id}", tags=[Tag.user])
-def provide_exam(): return 0
+def provide_exam():
+    return 0
 
 
 # File operations
 @app.get("/files", tags=[Tag.files])
-def search_files(): return 0
+def search_files():
+    return 0
 
 @app.post("/files", tags=[Tag.files])
-def upload_file(): return 0
+def upload_file():
+    return 0
 
 @app.get("/files/{file_id}", tags=[Tag.files])
-def check_file(): return 0
+def check_file():
+    return 0
 
 @app.patch("/files/{file_id}", tags=[Tag.files])
-def update_file(): return 0
+def update_file():
+    return 0
 
 @app.delete("/files/{file_id}", tags=[Tag.files])
-def delete_file(): return 0
+def delete_file():
+    return 0
 
 
 # LLM operations
 @app.get("/files/{file_id}/LLMOutcome", tags=[Tag.llm])
-def provide_outcomes(): return 0
+def provide_outcomes():
+    return 0
 
 @app.patch("/files/{file_id}/LLMOutcome", tags=[Tag.llm])
-def approve_outcomes(): return 0
+def approve_outcomes():
+    return 0
 
 @app.get("/files/{file_id}/LLMAssesment", tags=[Tag.llm])
-def provide_assesment(): return 0
+def provide_assesment():
+    return 0
 
 @app.patch("/files/{file_id}/LLMAssesment", tags=[Tag.llm])
-def approve_assesments(): return 0
+def approve_assesments():
+    return 0

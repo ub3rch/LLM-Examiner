@@ -1,4 +1,3 @@
 .venv
-requirements.txt
 __pycache__
 serviceAccountKey.json
