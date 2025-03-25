@@ -1,4 +1,5 @@
 import logging
+import requests
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -16,7 +17,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-USERS_DB = {}
+# Конфигурация API
+API_BASE_URL = "http://localhost:8000"
+BOT_TOKEN = "7266424537:AAG7T8KReTaDvxsYq84FZuZce6L1nwwg7S0"
+
+# Состояния бота
 CHOOSING, REGISTER_NAME, REGISTER_PASS, LOGIN_NAME, LOGIN_PASS, AUTHORIZED, UPLOAD_PDF = range(7)
 
 # Клавиатуры
@@ -38,12 +43,8 @@ async def choose_action(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text("Используйте кнопки!", reply_markup=main_keyboard)
     return CHOOSING
 
-# Логика регистрации
 async def register_name(update: Update, context: CallbackContext) -> int:
     name = update.message.text
-    if name in USERS_DB:
-        await update.message.reply_text("Имя занято! Введите другое:")
-        return REGISTER_NAME
     context.user_data["reg_name"] = name
     await update.message.reply_text("Придумайте пароль:")
     return REGISTER_PASS
@@ -51,16 +52,28 @@ async def register_name(update: Update, context: CallbackContext) -> int:
 async def register_pass(update: Update, context: CallbackContext) -> int:
     password = update.message.text
     name = context.user_data["reg_name"]
-    USERS_DB[name] = password
-    await show_auth_menu(update, f"Регистрация успешна, {name}!")
-    return AUTHORIZED
 
-# Логика входа
+    try:
+        # Отправляем запрос на регистрацию в API
+        response = requests.post(
+            f"{API_BASE_URL}/user",
+            json={"username": name, "password": password}
+        )
+        
+        if response.status_code == 200:
+            await show_auth_menu(update, f"Регистрация успешна, {name}!")
+            return AUTHORIZED
+        else:
+            error_msg = response.json().get("detail", "Ошибка регистрации")
+            await update.message.reply_text(f"Ошибка: {error_msg}")
+            return CHOOSING
+    except Exception as e:
+        logger.error(f"API error: {e}")
+        await update.message.reply_text("Ошибка соединения с сервером. Попробуйте позже.")
+        return CHOOSING
+
 async def login_name(update: Update, context: CallbackContext) -> int:
     name = update.message.text
-    if name not in USERS_DB:
-        await update.message.reply_text("Пользователь не найден! Введите имя:")
-        return LOGIN_NAME
     context.user_data["login_name"] = name
     await update.message.reply_text("Введите пароль:")
     return LOGIN_PASS
@@ -68,13 +81,28 @@ async def login_name(update: Update, context: CallbackContext) -> int:
 async def login_pass(update: Update, context: CallbackContext) -> int:
     password = update.message.text
     name = context.user_data["login_name"]
-    if USERS_DB.get(name) == password:
-        await show_auth_menu(update, f"Добро пожаловать, {name}!")
-        return AUTHORIZED
-    await update.message.reply_text("Неверный пароль! Попробуйте снова:")
-    return LOGIN_PASS
 
-# Меню авторизованного пользователя
+    try:
+        # Получаем токен от API
+        response = requests.post(
+            f"{API_BASE_URL}/token",
+            data={"username": name, "password": password}
+        )
+        
+        if response.status_code == 200:
+            token_data = response.json()
+            context.user_data["access_token"] = token_data["access_token"]
+            await show_auth_menu(update, f"Добро пожаловать, {name}!")
+            return AUTHORIZED
+        else:
+            error_msg = response.json().get("detail", "Неверный логин или пароль")
+            await update.message.reply_text(f"Ошибка: {error_msg}")
+            return LOGIN_NAME
+    except Exception as e:
+        logger.error(f"API error: {e}")
+        await update.message.reply_text("Ошибка соединения с сервером. Попробуйте позже.")
+        return CHOOSING
+
 async def show_auth_menu(update: Update, message: str) -> None:
     await update.message.reply_text(message, reply_markup=auth_keyboard)
 
@@ -90,13 +118,14 @@ async def auth_actions(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text("Используйте кнопки!", reply_markup=auth_keyboard)
     return AUTHORIZED
 
-# Логика работы с PDF
 async def upload_pdf(update: Update, context: CallbackContext) -> int:
     if document := update.message.document:
         if document.mime_type == "application/pdf":
+            # Здесь можно добавить загрузку файла на сервер через API
+            # Используя context.user_data["access_token"] для аутентификации
             file = await context.bot.get_file(document.file_id)
             await file.download_to_drive(f"{document.file_id}.pdf")
-            await update.message.reply_text("Файл сохранён!", reply_markup=auth_keyboard)
+            await update.message.reply_text("Файл сохранён локально!", reply_markup=auth_keyboard)
             return AUTHORIZED
     await update.message.reply_text("Отправьте PDF файл:", reply_markup=auth_keyboard)
     return UPLOAD_PDF
@@ -107,7 +136,7 @@ async def cancel(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 def main() -> None:
-    application = Application.builder().token("7266424537:AAG7T8KReTaDvxsYq84FZuZce6L1nwwg7S0").build()
+    application = Application.builder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
