@@ -19,7 +19,6 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 # Fastapi
 from fastapi import FastAPI, HTTPException, status
-from starlette.status import HTTP_404_NOT_FOUND
 
 
 
