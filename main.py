@@ -19,6 +19,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 # Fastapi
 from fastapi import FastAPI, HTTPException, status
+from starlette.status import HTTP_404_NOT_FOUND
 
 
 
@@ -31,35 +32,53 @@ class User(BaseModel):
 class UserInDB(User):
     hashed_password: str
 
+
 # DB initialization
 database = firestore.Client.from_service_account_json('./serviceAccountKey.json')
 users = database.collection("Users")
 
-# TODO: exceptions for database
+
 # DB operations
-def create_user(user_info: UserInDB):
-    user = users.document(user_info.username)
-    if user.get().exists:
-        raise HTTPException(status_code=400, detail="User exists")
-    user.set(user_info)
+async def create_user(user_info: UserInDB):
+    # Getting user document from DB
+    user_doc = users.document(user_info.username).get()
+    # Checking if user exists
+    if user_doc.exists:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User already exists")
+    # Hashing password
+    user_info.hashed_password = pwd_context.hash(user_info.hashed_password)
+    # Writing to DB
+    user_doc.set(user_info.model_dump())
+    
+async def get_user(username: str) -> UserInDB:
+    # Getting user document from DB
+    user_doc = users.document(username).get()
+    # Checking if user exists
+    if not user_doc.exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User does not exists")
+    # Retruning user
+    return UserInDB(**user_doc.to_dict())
 
-def get_user(username: str):
-    user = users.document(username)
-    if not user.get().exists:
-        raise HTTPException(status_code=404, detail="User does not exist")
-    return user.get()
-
-def update_user(user_info: UserInDB):
-    user = users.document(user_info.username)
-    if not user.get().exists:
-        raise HTTPException(status_code=404, detail="User does not exist")
-    user.update(user_info)
+async def update_user(user_info: UserInDB):
+    # Getting user document from DB
+    user_doc = users.document(user_info.username).get()
+    # Checking if user exists
+    if not user_doc.exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User does not exists")
+    # Checking if username stays unchanged
+    if user_doc.to_dict()['username']!=user_info.username:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Username change is not allowed")
+    # Update user with new values
+    user_doc.update(user_info.model_dump())
 
 def delete_user(username: str):
-    user = users.document(username)
-    if not user.get().exists:
-        raise HTTPException(status_code=404, detail="User does not exist")
-    user.delete()
+    # Getting user document from DB
+    user_doc = users.document(username).get()
+    # Checking if user exists
+    if not user_doc.exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User does not exists")
+    # Deleting from DB
+    user_doc.delete()
 
 
 
@@ -83,39 +102,10 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 auth = OAuth2PasswordBearer(tokenUrl="auth")
 
 # Authorization operations
-def authenticate_user(username: str, password: str):
-    user_ref = users.document(username)
-    user_doc = user_ref.get()
-    
-    if not user_doc.exists:
-        return False
-    
-    # Получаем данные пользователя из документа
-    user_data = user_doc.to_dict()
-    
-    # Проверяем пароль
-    if not pwd_context.verify(password, user_data.get("hashed_password")):
-        return False
-    
-    # Возвращаем объект пользователя
-    return UserInDB(**user_data)
-
-def create_access_token(data: dict, expires_delta: timedelta | None = None):
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
-    else:
-        expire = datetime.now(timezone.utc) + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-
-async def get_current_user(token: Annotated[str, Depends(auth)]):
+async def authorize_user(token: Annotated[str, Depends(auth)])->User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
     )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -125,10 +115,10 @@ async def get_current_user(token: Annotated[str, Depends(auth)]):
         token_data = TokenData(username=username)
     except InvalidTokenError:
         raise credentials_exception
-    user = get_user(db, username=token_data.username)
+    user = await get_user(username=token_data.username)
     if user is None:
         raise credentials_exception
-    return user
+    return User(**user.model_dump())
 
 
 
@@ -206,47 +196,48 @@ app=FastAPI(
 async def log_in(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
 ) -> Token:
-    user = authenticate_user(form_data.username, form_data.password)
-    if not user:
+    # Get user
+    user = await get_user(form_data.username)
+    
+    # Check password correcthess
+    if not pwd_context.verify(form_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
+            detail="Incorrect password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
-    )
-    return Token(access_token=access_token, token_type="bearer")
+
+    # Create and return token
+    access_token_expires = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode = {'sub': user.username, 'exp':access_token_expires}
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return Token(access_token=encoded_jwt, token_type="bearer")
 
 
 # User account operations
 @app.get("/user", tags=[Tag.user], response_model=User)
-def user_info():
-    return
+async def receive_user_info(user: Annotated[User, Depends(authorize_user)])->User:
+    return user
 
 @app.post("/user", dependencies=[], tags=[Tag.user])
-def register_user(user_info: UserInDB):
-    user = users.document(user_info.username)
-    if user.get().exists:
-        raise HTTPException(status_code=402, detail="User with such login exists")
-    user_info.hashed_password = pwd_context.hash(user_info.hashed_password)
-    user.set(user_info.model_dump())
+async def register_user_accoutn(user_info: UserInDB):
+    await create_user(user_info)
 
 @app.patch("/user", dependencies=[], tags=[Tag.user])
-def update_user():
+async def update_user_account(user: Annotated[User, Depends(authorize_user)]):
     return 0
 
 @app.delete("/user", tags=[Tag.user])
-def delete_user():
-    return 0
+async def delete_user_account(user: Annotated[User, Depends(authorize_user)]):
+    await delete_user(user.username)
 
+# TODO: add study log calls
 @app.get("/user/{file_id}", tags=[Tag.user])
-def receive_material():
+def receive_material(user: Annotated[User, Depends(authorize_user)]):
     return 0
 
 @app.post("/user/{file_id}", tags=[Tag.user])
-def provide_exam():
+def provide_exam(user: Annotated[User, Depends(authorize_user)]):
     return 0
 
 
@@ -256,35 +247,35 @@ def search_files():
     return 0
 
 @app.post("/files", tags=[Tag.files])
-def upload_file():
+def upload_file(user: Annotated[User, Depends(authorize_user)]):
     return 0
 
 @app.get("/files/{file_id}", tags=[Tag.files])
-def check_file():
+def check_file(user: Annotated[User, Depends(authorize_user)]):
     return 0
 
 @app.patch("/files/{file_id}", tags=[Tag.files])
-def update_file():
+def update_file(user: Annotated[User, Depends(authorize_user)]):
     return 0
 
 @app.delete("/files/{file_id}", tags=[Tag.files])
-def delete_file():
+def delete_file(user: Annotated[User, Depends(authorize_user)]):
     return 0
 
 
 # LLM operations
 @app.get("/files/{file_id}/LLMOutcome", tags=[Tag.llm])
-def provide_outcomes():
+def provide_outcomes(user: Annotated[User, Depends(authorize_user)]):
     return 0
 
 @app.patch("/files/{file_id}/LLMOutcome", tags=[Tag.llm])
-def approve_outcomes():
+def approve_outcomes(user: Annotated[User, Depends(authorize_user)]):
     return 0
 
 @app.get("/files/{file_id}/LLMAssesment", tags=[Tag.llm])
-def provide_assesment():
+def provide_assesment(user: Annotated[User, Depends(authorize_user)]):
     return 0
 
 @app.patch("/files/{file_id}/LLMAssesment", tags=[Tag.llm])
-def approve_assesments():
+def approve_assesments(user: Annotated[User, Depends(authorize_user)]):
     return 0
