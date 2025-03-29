@@ -2,14 +2,14 @@
 
 # Types
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any
-from pydantic import BaseModel, Field
+from typing import Annotated
+from pydantic import BaseModel
 from enum import Enum
-from fastapi import Depends
-from fastapi.responses import JSONResponse
+from fastapi import Depends, UploadFile
 
 # Database
 from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 # Security
 import jwt
@@ -18,40 +18,57 @@ from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 # Fastapi
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Query
 
 
 
 # Database section
 
 # Data models
-class User(BaseModel):
+class UserInfo(BaseModel):
     username: str
 
-class UserInDB(User):
+class UserInDB(UserInfo):
     hashed_password: str
+
+class FileInDB(BaseModel):
+    filename: str
+    author: str = ''
+    tags: list[str] = []
+
+class FileInfo(FileInDB):
+    id: str
+
+class FileFilters(BaseModel):
+    name: str | None = None
+    author: str | None = None
+    tags: list[str] | None = None
 
 
 # DB initialization
 database = firestore.Client.from_service_account_json('./serviceAccountKey.json')
 users = database.collection("Users")
+files = database.collection("Files")
 
 
 # DB operations
+# Users
 async def create_user(user_info: UserInDB):
     # Getting user document from DB
-    user_doc = users.document(user_info.username).get()
+    user_ref = users.document(user_info.username)
+    user_doc = user_ref.get()
     # Checking if user exists
     if user_doc.exists:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User already exists")
     # Hashing password
     user_info.hashed_password = pwd_context.hash(user_info.hashed_password)
     # Writing to DB
-    user_doc.set(user_info.model_dump())
+    user_ref.set(user_info.model_dump())
     
 async def get_user(username: str) -> UserInDB:
     # Getting user document from DB
-    user_doc = users.document(username).get()
+    user_ref = users.document(username)
+    user_doc = user_ref.get()
     # Checking if user exists
     if not user_doc.exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User does not exists")
@@ -60,7 +77,8 @@ async def get_user(username: str) -> UserInDB:
 
 async def update_user(user_info: UserInDB):
     # Getting user document from DB
-    user_doc = users.document(user_info.username).get()
+    user_ref = users.document(username)
+    user_doc = user_ref.get()
     # Checking if user exists
     if not user_doc.exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User does not exists")
@@ -68,16 +86,59 @@ async def update_user(user_info: UserInDB):
     if user_doc.to_dict()['username']!=user_info.username:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Username change is not allowed")
     # Update user with new values
-    user_doc.update(user_info.model_dump())
+    user_ref.update(user_info.model_dump())
 
-def delete_user(username: str):
+async def delete_user(username: str):
     # Getting user document from DB
-    user_doc = users.document(username).get()
+    user_ref = users.document(username)
+    user_doc = user_ref.get()
     # Checking if user exists
     if not user_doc.exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User does not exists")
     # Deleting from DB
-    user_doc.delete()
+    user_ref.delete()
+
+# Files
+async def create_file_db(file_info: FileInDB)->str:
+    # Creating file document in DB
+    file_ref = files.document()
+    # Filling document
+    file_ref.set(file_info.model_dump())
+    return file_ref.id
+
+async def get_file_db(file_id: str)->FileInDB:
+    # Getting file document from DB
+    file_ref = files.document(file_id)
+    file_doc = file_ref.get()
+    # Checking if file exists
+    if not user_doc.exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File does not exists")
+    return FileInDB(**file_doc.to_dict())
+
+async def update_file_db(file_info: FileInfo):
+    # Getting file document from DB
+    file_ref = files.document(file_info.id)
+    file_doc = file_ref.get()
+    # Checking if file exists
+    if not file_doc.exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File does not exists")
+    file_ref.update(FileInDB(**file_info.model_dump()).model_dump())
+
+async def delete_file_db(file_id: str):
+    # Getting file document from DB
+    file_ref = files.document(file_id)
+    file_doc = file_ref.get()
+    # Checking if file exists
+    if not file_doc.exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File does not exists")
+    # Deleting file
+    file_ref.delete()
+
+async def convert_query_to_list(query)->list[FileInfo]:
+    result = []
+    for file in query:
+        result.append(FileInfo(**file.to_dict(), id=str(file.id)))
+    return result
 
 
 
@@ -101,7 +162,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 auth = OAuth2PasswordBearer(tokenUrl="auth")
 
 # Authorization operations
-async def authorize_user(token: Annotated[str, Depends(auth)])->User:
+async def authorize_user(token: Annotated[str, Depends(auth)])->UserInfo:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -117,7 +178,7 @@ async def authorize_user(token: Annotated[str, Depends(auth)])->User:
     user = await get_user(username=token_data.username)
     if user is None:
         raise credentials_exception
-    return User(**user.model_dump())
+    return UserInfo(**user.model_dump())
 
 
 
@@ -149,10 +210,10 @@ description = """
 
 User account operations:
 
-* **Check your account** (_not implemented_)
-* **Create account** (_not implemented_)
+* **Check your account**
+* **Create account**
 * **Update account** (_not implemented_)
-* **Delete account** (_not implemented_)
+* **Delete account**
 * **Study material** (_not implemented_)
 * **Try to pass assesment for material** (_not implemented_)
 
@@ -160,11 +221,10 @@ User account operations:
 
 File operations:
 
-* **Search for files** (_not implemented_)
-* **Uploas files** (_not implemented_)
-* **Watch files** (_not implemented_)
-* **Update files** (_not implemented_)
-* **Delete files** (_not implemented_)
+* **Search for files**
+* **Uploas files**
+* **Update files**
+* **Delete files**
 
 ## LLM
 
@@ -214,8 +274,8 @@ async def log_in(
 
 
 # User account operations
-@app.get("/user", tags=[Tag.user], response_model=User)
-async def receive_user_info(user: Annotated[User, Depends(authorize_user)])->User:
+@app.get("/user", tags=[Tag.user], response_model=UserInfo)
+async def receive_user_info(user: Annotated[UserInfo, Depends(authorize_user)])->UserInfo:
     return user
 
 @app.post("/user", dependencies=[], tags=[Tag.user])
@@ -223,58 +283,75 @@ async def register_user_accoutn(user_info: UserInDB):
     await create_user(user_info)
 
 @app.patch("/user", dependencies=[], tags=[Tag.user])
-async def update_user_account(user: Annotated[User, Depends(authorize_user)]):
+async def update_user_account(user: Annotated[UserInfo, Depends(authorize_user)]):
     return 0
 
 @app.delete("/user", tags=[Tag.user])
-async def delete_user_account(user: Annotated[User, Depends(authorize_user)]):
+async def delete_user_account(user: Annotated[UserInfo, Depends(authorize_user)]):
     await delete_user(user.username)
 
 # TODO: add study log calls
 @app.get("/user/{file_id}", tags=[Tag.user])
-def receive_material(user: Annotated[User, Depends(authorize_user)]):
+def receive_material(user: Annotated[UserInfo, Depends(authorize_user)]):
     return 0
 
 @app.post("/user/{file_id}", tags=[Tag.user])
-def provide_exam(user: Annotated[User, Depends(authorize_user)]):
+def provide_exam(user: Annotated[UserInfo, Depends(authorize_user)]):
     return 0
+
 
 
 # File operations
 @app.get("/files", tags=[Tag.files])
-def search_files():
-    return 0
+async def search_files(filter: Annotated[FileFilters, Query()])->list[FileInfo]:
+    query = files.where(filter=FieldFilter('filename', '>=', ''))
+    if filter.name:
+        query = query.where(filter=FieldFilter('filename', '==', filter.name))
+    if filter.author:
+        query = query.where(filter=FieldFilter('author', '==', filter.author))
+    if filter.tags:
+        query = query.where(filter=FieldFilter('tags', 'array_contains_any', filter.tags))
+    return await convert_query_to_list(query.stream())
 
 @app.post("/files", tags=[Tag.files])
-def upload_file(user: Annotated[User, Depends(authorize_user)]):
-    return 0
-
-@app.get("/files/{file_id}", tags=[Tag.files])
-def check_file(user: Annotated[User, Depends(authorize_user)]):
-    return 0
+async def upload_file(
+    user: Annotated[UserInfo, Depends(authorize_user)],
+    file_info: FileInDB
+)->str:
+    file_info.author = user.username
+    return await create_file_db(file_info)
 
 @app.patch("/files/{file_id}", tags=[Tag.files])
-def update_file(user: Annotated[User, Depends(authorize_user)]):
-    return 0
+async def update_file(
+    user: Annotated[UserInfo, Depends(authorize_user)],
+    file_info: FileInDB,
+    file_id: str
+):
+    file_info.author = user.username
+    file_info = FileInfo(**file_info.model_dump(), id=file_id)
+    await update_file_db(file_info)
 
 @app.delete("/files/{file_id}", tags=[Tag.files])
-def delete_file(user: Annotated[User, Depends(authorize_user)]):
-    return 0
+async def delete_file(
+    user: Annotated[UserInfo, Depends(authorize_user)],
+    file_id: str
+):
+    await delete_file_db(file_id)
 
 
 # LLM operations
 @app.get("/files/{file_id}/LLMOutcome", tags=[Tag.llm])
-def provide_outcomes(user: Annotated[User, Depends(authorize_user)]):
+def provide_outcomes(user: Annotated[UserInfo, Depends(authorize_user)]):
     return 0
 
 @app.patch("/files/{file_id}/LLMOutcome", tags=[Tag.llm])
-def approve_outcomes(user: Annotated[User, Depends(authorize_user)]):
+def approve_outcomes(user: Annotated[UserInfo, Depends(authorize_user)]):
     return 0
 
 @app.get("/files/{file_id}/LLMAssesment", tags=[Tag.llm])
-def provide_assesment(user: Annotated[User, Depends(authorize_user)]):
+def provide_assesment(user: Annotated[UserInfo, Depends(authorize_user)]):
     return 0
 
 @app.patch("/files/{file_id}/LLMAssesment", tags=[Tag.llm])
-def approve_assesments(user: Annotated[User, Depends(authorize_user)]):
+def approve_assesments(user: Annotated[UserInfo, Depends(authorize_user)]):
     return 0
