@@ -3,5 +3,4 @@ pyjwt
 passlib[bcrypt]
 firebase-admin
 google-cloud-firestore
-telegram
-firestore
+python-telegram-bot
