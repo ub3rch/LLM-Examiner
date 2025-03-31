@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from pydantic import BaseModel
 from enum import Enum
-from fastapi import Depends, UploadFile
+from fastapi import Depends, Body
 
 # Database
 from google.cloud import firestore
@@ -27,6 +27,7 @@ from fastapi import FastAPI, HTTPException, status, Query
 # Data models
 class UserInfo(BaseModel):
     username: str
+    studied_files: dict[str,int] = {}
 
 class UserInDB(UserInfo):
     hashed_password: str
@@ -98,6 +99,24 @@ async def delete_user(username: str):
     # Deleting from DB
     user_ref.delete()
 
+async def log_user_study(username:str, file_id: str, status_code: int):
+    # Getting user document from DB
+    user_ref = users.document(username)
+    user_doc = user_ref.get()
+    # Checking if user exists
+    if not user_doc.exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User does not exists")
+    # Getting file document from DB
+    file_ref = files.document(file_id)
+    file_doc = file_ref.get()
+    # Checking if file exists
+    if not user_doc.exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File does not exists")
+    user_info = UserInfo(**user_doc.to_dict())
+    user_info.studied_files[file_id] = status_code
+    user_ref.update(user_info.model_dump())
+
+
 # Files
 async def create_file_db(file_info: FileInDB)->str:
     # Creating file document in DB
@@ -119,15 +138,21 @@ async def update_file_db(file_info: FileInfo):
     # Getting file document from DB
     file_ref = files.document(file_info.id)
     file_doc = file_ref.get()
+    # Checking if current user can delete the file
+    if not file_info.author == file_doc.to_dict()['author']:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User cannot change this file")
     # Checking if file exists
     if not file_doc.exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File does not exists")
     file_ref.update(FileInDB(**file_info.model_dump()).model_dump())
 
-async def delete_file_db(file_id: str):
+async def delete_file_db(file_id: str, cur_user: str):
     # Getting file document from DB
     file_ref = files.document(file_id)
     file_doc = file_ref.get()
+    # Checking if current user can delete the file
+    if not cur_user == file_doc.to_dict()['author']:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User cannot delete this file")
     # Checking if file exists
     if not file_doc.exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File does not exists")
@@ -212,7 +237,7 @@ User account operations:
 
 * **Check your account**
 * **Create account**
-* **Update account** (_not implemented_)
+* **Update account**
 * **Delete account**
 * **Study material** (_not implemented_)
 * **Try to pass assesment for material** (_not implemented_)
@@ -225,15 +250,6 @@ File operations:
 * **Uploas files**
 * **Update files**
 * **Delete files**
-
-## LLM
-
-LLM operations:
-
-* **Ask LLM for material outcomes** (_not implemented_)
-* **Upload edited and approved outcomes** (_not implemented_)
-* **Ask LLM for material assesments** (_not implemented_)
-* **Upload edited and approved assesments** (_not implemented_)
 """
 
 
@@ -274,30 +290,42 @@ async def log_in(
 
 
 # User account operations
+# Get user info
 @app.get("/user", tags=[Tag.user], response_model=UserInfo)
 async def receive_user_info(user: Annotated[UserInfo, Depends(authorize_user)])->UserInfo:
     return user
 
+# Register new user
 @app.post("/user", dependencies=[], tags=[Tag.user])
 async def register_user_accoutn(user_info: UserInDB):
     await create_user(user_info)
 
+# Update user info
 @app.patch("/user", dependencies=[], tags=[Tag.user])
 async def update_user_account(user: Annotated[UserInfo, Depends(authorize_user)]):
     return 0
 
+# Delete user account
 @app.delete("/user", tags=[Tag.user])
 async def delete_user_account(user: Annotated[UserInfo, Depends(authorize_user)]):
     await delete_user(user.username)
 
-# TODO: add study log calls
+# Log study process to user
 @app.get("/user/{file_id}", tags=[Tag.user])
-def receive_material(user: Annotated[UserInfo, Depends(authorize_user)]):
-    return 0
+async def study_material(
+    user: Annotated[UserInfo, Depends(authorize_user)],
+    file_id: str
+):
+    await log_user_study(user.username, file_id, -1)
 
+# Log passed assesment to user
 @app.post("/user/{file_id}", tags=[Tag.user])
-def provide_exam(user: Annotated[UserInfo, Depends(authorize_user)]):
-    return 0
+async def prove_studied_material(
+    user: Annotated[UserInfo, Depends(authorize_user)],
+    file_id: str,
+    assesment_score: Annotated[int, Body()]
+):
+    await log_user_study(user.username, file_id, assesment_score)
 
 
 
@@ -324,8 +352,8 @@ async def upload_file(
 @app.patch("/files/{file_id}", tags=[Tag.files])
 async def update_file(
     user: Annotated[UserInfo, Depends(authorize_user)],
-    file_info: FileInDB,
-    file_id: str
+    file_id: str,
+    file_info: FileInDB
 ):
     file_info.author = user.username
     file_info = FileInfo(**file_info.model_dump(), id=file_id)
@@ -336,22 +364,4 @@ async def delete_file(
     user: Annotated[UserInfo, Depends(authorize_user)],
     file_id: str
 ):
-    await delete_file_db(file_id)
-
-
-# LLM operations
-@app.get("/files/{file_id}/LLMOutcome", tags=[Tag.llm])
-def provide_outcomes(user: Annotated[UserInfo, Depends(authorize_user)]):
-    return 0
-
-@app.patch("/files/{file_id}/LLMOutcome", tags=[Tag.llm])
-def approve_outcomes(user: Annotated[UserInfo, Depends(authorize_user)]):
-    return 0
-
-@app.get("/files/{file_id}/LLMAssesment", tags=[Tag.llm])
-def provide_assesment(user: Annotated[UserInfo, Depends(authorize_user)]):
-    return 0
-
-@app.patch("/files/{file_id}/LLMAssesment", tags=[Tag.llm])
-def approve_assesments(user: Annotated[UserInfo, Depends(authorize_user)]):
-    return 0
+    await delete_file_db(file_id, user.username)
