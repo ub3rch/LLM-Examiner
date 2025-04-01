@@ -1,6 +1,9 @@
 import logging
+import asyncio
+import json
 import os
 import requests
+from typing import List, Dict
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -31,8 +34,9 @@ OPENAI_API_KEY = "key"
     CHOOSING, REGISTER_NAME, REGISTER_PASS, LOGIN_NAME, LOGIN_PASS, 
     AUTHORIZED, UPLOAD_PDF, FROM_REG_TO_LOG, EDIT_TOPIC, EDIT_TOPIC_NAME, EDIT_CONCLUSIONS,
     REWRITE_CONCLUSIONS, REGENERATE_CONCLUSIONS, ADD_COMMENT, DELETE_CONFIRM, VIEW_TOPICS, 
-    INSTRUCTOR_ACTIONS, VIEW_TOPICS_INLINE, TOPIC_DETAILS, VIEW_LEARNER_TOPICS_INLINE, LEARNER_TOPIC_DETAILS
-) = range(21)
+    INSTRUCTOR_ACTIONS, VIEW_TOPICS_INLINE, TOPIC_DETAILS, VIEW_LEARNER_TOPICS_INLINE, LEARNER_TOPIC_DETAILS,
+    TAKING_TEST, TEST_RESULTS, WAITING_FOR_NEXT, GENERATE_ASSESSMENT, REVIEW_ASSESSMENT, SAVE_ASSESSMENT
+) = range(27)
 
 # Клавиатуры
 main_keyboard = ReplyKeyboardMarkup([["Регистрация", "Вход"]], one_time_keyboard=True)
@@ -69,6 +73,7 @@ os.makedirs(TOPICS_DIR, exist_ok=True)
 # Фиксированные имена файлов
 PDF_FILENAME = "doc.pdf"
 OUTCOMES_FILENAME = "outcomes.txt"
+ASSESSMENT_FILENAME = "assessment.txt"
 
 async def start(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text("Выберите действие:", reply_markup=main_keyboard)
@@ -523,12 +528,23 @@ async def learner_topic_selected(update: Update, context: CallbackContext) -> in
                 if len(content) > 1:
                     conclusions = content[1]
         
-        await query.edit_message_text(
-            f"Тема: {topic_name}\n\nВыводы:\n{conclusions[:3000]}",
-            reply_markup=InlineKeyboardMarkup([
+        # Обновленная клавиатура с кнопкой теста
+        has_assessment = os.path.exists(os.path.join(topic_dir, ASSESSMENT_FILENAME))
+        if(has_assessment):
+            keyboard = [
+                [InlineKeyboardButton("Пройти тест", callback_data="start_test")],
                 [InlineKeyboardButton("Скачать документ", callback_data="learner_download")],
                 [InlineKeyboardButton("Назад к списку тем", callback_data="learner_back")]
-            ])
+            ]
+        else:
+            keyboard = [
+                [InlineKeyboardButton("Скачать документ", callback_data="learner_download")],
+                [InlineKeyboardButton("Назад к списку тем", callback_data="learner_back")]
+            ]
+        
+        await query.edit_message_text(
+            f"Тема: {topic_name}\n\nВыводы:\n{conclusions[:3000]}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return LEARNER_TOPIC_DETAILS
     except Exception as e:
@@ -630,6 +646,284 @@ async def ask_gpt(pdf_text: str, additional_prompt: str = "") -> str:
         logger.error(f"OpenAI error: {e}")
         return "Произошла ошибка при обработке запроса OpenAI."
 
+async def start_test(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    topic_name = context.user_data["current_learner_topic"]
+    
+    # Загружаем тест из файла
+    test = await load_assessment(topic_name)
+    if not test:
+        await query.message.reply_text("❌ Тест для этой темы не найден")
+        return LEARNER_TOPIC_DETAILS
+    
+    # Сохраняем тест в контексте
+    context.user_data["current_test"] = {
+        **test,
+        "current_question": 0,
+        "score": 0,
+        "answers": []
+    }
+    
+    # Показываем первый вопрос
+    await show_question(
+        update, 
+        context,
+        test["questions"][0],
+        0,
+        len(test["questions"])
+    )
+    return TAKING_TEST
+
+async def show_question(update: Update, context: CallbackContext, question: Dict, q_num: int, total: int):
+    # Сохраняем текущий вопрос в контексте
+    context.user_data['current_test']['current_question'] = q_num
+    
+    keyboard = [
+        [InlineKeyboardButton(option, callback_data=f"test_answer_{q_num}_{i}")]
+        for i, option in enumerate(question["options"])
+    ]
+    
+    text = (
+        f"📚 Тема: {context.user_data['current_test']['topic']}\n\n"
+        f"❓ Вопрос {q_num+1}/{total}:\n"
+        f"{question['question']}"
+    )
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard))
+    
+async def back_to_topics(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    return await view_learner_topics_inline(update, context)
+
+async def handle_test_answer(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        # Разбираем callback_data
+        _, _, q_num, answer_idx = query.data.split('_')
+        q_num = int(q_num)
+        answer_idx = int(answer_idx)
+        
+        test_data = context.user_data['current_test']
+        question = test_data['questions'][q_num]
+        
+        # Сохраняем ответ
+        test_data.setdefault('answers', []).append({
+            'question': question['question'],
+            'user_answer': answer_idx,
+            'correct_answer': question['correct'],
+            'explanation': question.get('explanation', '')
+        })
+
+        # Проверяем ответ
+        if answer_idx == question['correct']:
+            test_data['score'] += 1
+            feedback = "✅ Верно!"
+        else:
+            correct_option = question['options'][question['correct']]
+            feedback = f"❌ Неверно! Правильный ответ: {correct_option}"
+
+        if 'explanation' in question:
+            feedback += f"\n\n💡 Пояснение: {question['explanation']}"
+
+        # Создаем клавиатуру с кнопкой "Следующий вопрос"
+        keyboard = []
+        next_q = q_num + 1
+        
+        if next_q < len(test_data['questions']):
+            keyboard.append([InlineKeyboardButton("Следующий вопрос →", callback_data=f"next_question_{next_q}")])
+        else:
+            keyboard.append([InlineKeyboardButton("Посмотреть результаты", callback_data="show_results")])
+
+        # Показываем результат с кнопкой
+        await query.edit_message_text(
+            f"{feedback}\n\n"
+            f"Вопрос {q_num+1}/{len(test_data['questions'])}\n"
+            f"{question['question']}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        return WAITING_FOR_NEXT  # Новое состояние ожидания
+
+    except Exception as e:
+        logger.error(f"Error in handle_test_answer: {e}")
+        await query.message.reply_text("Произошла ошибка при обработке ответа")
+        return TAKING_TEST
+
+
+async def next_question_handler(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        if query.data == "show_results":
+            await show_test_results(update, context)
+            return TEST_RESULTS
+        else:
+            _, _, next_q = query.data.split('_')
+            next_q = int(next_q)
+            
+            test_data = context.user_data['current_test']
+            test_data['current_question'] = next_q
+            
+            await show_question(
+                update, 
+                context,
+                test_data['questions'][next_q],
+                next_q,
+                len(test_data['questions'])
+            )
+            return TAKING_TEST
+            
+    except Exception as e:
+        logger.error(f"Error in next_question_handler: {e}")
+        await query.message.reply_text("Произошла ошибка при переходе к следующему вопросу")
+        return TAKING_TEST
+
+
+async def show_test_results(update: Update, context: CallbackContext):
+    test_data = context.user_data["current_test"]
+    score = test_data["score"]
+    total = len(test_data["questions"])
+    percentage = score/total*100
+    
+    # Формируем сообщение с результатами
+    result_message = (
+        f"📊 Результаты теста по теме '{test_data['topic']}':\n"
+        f"🔹 Правильных ответов: {score}/{total}\n"
+        f"🔹 Успешность: {percentage:.0f}%\n\n"
+    )
+    
+    # Добавляем анализ по вопросам
+    if percentage < 70:
+        result_message += "📝 Рекомендуется повторить материал:\n"
+        for answer in test_data["answers"]:
+            if answer["user_answer"] != answer["correct_answer"]:
+                result_message += f"\n• {answer['question']}\n"
+                if answer["explanation"]:
+                    result_message += f"  💡 {answer['explanation']}\n"
+    
+    # Добавляем кнопки
+    keyboard = [
+        [InlineKeyboardButton("Пройти тест ещё раз", callback_data="restart_test")],
+        [InlineKeyboardButton("Вернуться к темам", callback_data="back_to_topics")]
+    ]
+    
+    await update.callback_query.message.reply_text(
+        result_message,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def restart_test(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    # Очищаем предыдущие результаты
+    context.user_data["current_test"]["current_question"] = 0
+    context.user_data["current_test"]["score"] = 0
+    context.user_data["current_test"]["answers"] = []
+    
+    # Начинаем тест заново
+    await show_question(
+        update, 
+        context,
+        context.user_data["current_test"]["questions"][0],
+        0,
+        len(context.user_data["current_test"]["questions"]))
+    return TAKING_TEST
+
+
+async def generate_test_from_content(topic_name: str) -> Dict:
+    # Получаем текст PDF и выводы
+    topic_dir = os.path.join(TOPICS_DIR, topic_name)
+    pdf_path = os.path.join(topic_dir, PDF_FILENAME)
+    outcomes_path = os.path.join(topic_dir, OUTCOMES_FILENAME)
+    
+    try:
+        # Извлекаем текст из PDF
+        pdf_text = extract_text_from_pdf(pdf_path)
+        
+        # Читаем выводы
+        with open(outcomes_path, "r", encoding="utf-8") as f:
+            outcomes_text = f.read()
+        
+        # Формируем промпт для GPT
+        prompt = """
+        You are given a document and the desired learning outcomes that learners should learn by reading this document. Your task is to generate a multiple choice test with one question for each outcome. Your answer is processed automatically and YOU DO NOT HAVE TO WRITE ANYTHING BUT THE TEST ITSELF IN THE CORRECT JSON FORMAT. Format:
+        {
+          "topic": "Topic Title",
+          "questions": [
+            {
+              "question": "Текст вопроса",
+              "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
+              "correct": 0 (correct answer index),
+              "explanation": "Brief explanation of the correct answer"
+            }
+          ]
+        }
+        Questions should:
+        - Test understanding of key concepts from the document
+        - Be aligned with the learning outcomes
+        - Have one clear correct answer
+        - Be in the same language as the source document
+        """
+        
+        # Отправляем в GPT
+        response = await ask_gpt_for_assesments(
+            pdf_text=pdf_text,
+            outcomes_text=outcomes_text,
+            additional_prompt=prompt
+        )
+        
+        # Очищаем ответ от возможных некорректных символов
+        cleaned_response = response.strip().replace("```json", "").replace("```", "")
+        
+        return json.loads(cleaned_response)
+    
+    except Exception as e:
+        logger.error(f"Ошибка генерации теста: {e}")
+        return None
+
+async def load_assessment(topic_name: str) -> Dict:
+    topic_dir = os.path.join(TOPICS_DIR, topic_name)
+    assessment_path = os.path.join(topic_dir, ASSESSMENT_FILENAME)
+    
+    if not os.path.exists(assessment_path):
+        return None
+        
+    with open(assessment_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+async def ask_gpt_for_assesments(pdf_text: str, outcomes_text: str, additional_prompt: str = "") -> str:
+    """Отправляет текст из PDF в GPT и возвращает ответ"""
+    try:
+        prompt = f'{additional_prompt}\n Document is next:\n\n"{pdf_text}"\n\nOutcomes are next:\n\n"{outcomes_text}"\n\n'
+        
+        response = openai_client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are an assistant in creating simple multiple choice tests using source document of the course and learning outcomes."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+        )
+        
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"OpenAI error: {e}")
+        return "Произошла ошибка при обработке запроса OpenAI."
+
 def sanitize_topic_name(topic: str) -> str:
     """Очищает название темы от недопустимых символов"""
     invalid_chars = '<>:"/\\|?*'
@@ -638,35 +932,46 @@ def sanitize_topic_name(topic: str) -> str:
     return topic[:40].strip()  # Ограничение длины названия темы
 
 async def show_topic_info(update: Update, context: CallbackContext) -> None:
-    """Показывает информацию о текущей теме и выводах"""
     topic_name = context.user_data.get("current_topic", "Untitled")
     gpt_response = context.user_data.get("gpt_response", "")
     
-    # Извлекаем выводы (все кроме первой строки)
+    # Извлекаем выводы
     conclusions = gpt_response.split('\n', 1)[1] if '\n' in gpt_response else "Нет выводов"
     
-    # Определяем источник сообщения
+    # Проверяем, есть ли уже тест
+    topic_dir = context.user_data["topic_dir"]
+    has_assessment = os.path.exists(os.path.join(topic_dir, ASSESSMENT_FILENAME))
+    
+    # Создаем клавиатуру
+    keyboard = [
+        ["Изменить название темы", "Изменить выводы"],
+        ["Создать тест" if not has_assessment else "Просмотреть тест", "Удалить документ"],
+        ["Сохранить выводы"]
+    ]
+    
+    message = f"Текущая тема: {topic_name}\n\nВыводы:\n{conclusions[:4000]}"
+    
     if update.message:
         await update.message.reply_text(
-            f"Текущая тема: {topic_name}\n\nВыводы:\n{conclusions[:4000]}",
-            reply_markup=edit_options_keyboard
+            message,
+            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
         )
     elif update.callback_query:
         await update.callback_query.message.reply_text(
-            f"Текущая тема: {topic_name}\n\nВыводы:\n{conclusions[:4000]}",
-            reply_markup=edit_options_keyboard
+            message,
+            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
         )
     
     if len(conclusions) > 4000:
         if update.message:
             await update.message.reply_text(
                 "Полный текст выводов сохранен в файл.",
-                reply_markup=edit_options_keyboard
+                reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
             )
         elif update.callback_query:
             await update.callback_query.message.reply_text(
                 "Полный текст выводов сохранен в файл.",
-                reply_markup=edit_options_keyboard
+                reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
             )
 
 def get_unique_topic_dir(base_dir: str, topic_name: str) -> tuple[str, bool]:
@@ -784,16 +1089,271 @@ async def edit_topic(update: Update, context: CallbackContext) -> int:
             reply_markup=delete_confirm_keyboard
         )
         return DELETE_CONFIRM
+    elif text == "Создать тест":
+        # Генерируем тест при подтверждении темы
+        return await generate_and_review_assessment(update, context)
+    elif text == "Просмотреть тест":
+        # Показываем существующий тест
+        return await view_existing_assessment(update, context)
     elif text == "Сохранить выводы":
-        await update.message.reply_text("Документ и выводы сохранены!\nВыберите действие с темами:", reply_markup=instructor_keyboard)
-        # Очищаем временные данные
-        context.user_data.pop("current_topic", None)
-        context.user_data.pop("topic_dir", None)
-        context.user_data.pop("gpt_response", None)
+        await update.message.reply_text(
+            "Тема сохранена",
+            reply_markup=instructor_keyboard
+        )
         return INSTRUCTOR_ACTIONS
     else:
         await show_topic_info(update, context)
         return EDIT_TOPIC
+
+
+async def view_existing_assessment(update: Update, context: CallbackContext) -> int:
+    topic_name = context.user_data["current_topic"]
+    topic_dir = context.user_data["topic_dir"]
+    
+    try:
+        # Загружаем тест из файла
+        test = await load_assessment(topic_name)
+        if not test:
+            await update.message.reply_text("❌ Тест для этой темы не найден")
+            return EDIT_TOPIC
+        
+        # Сохраняем тест в контексте
+        context.user_data["current_assessment"] = test
+        
+        # Форматируем тест для отображения
+        formatted_test = format_test_for_display(test)
+        
+        # Создаем клавиатуру с опциями
+        keyboard = [
+            [InlineKeyboardButton("Регенерировать тест", callback_data="regenerate_assessment")],
+            [InlineKeyboardButton("Удалить тест", callback_data="delete_assessment")],
+            [InlineKeyboardButton("Назад к редактированию", callback_data="back_to_edit")]
+        ]
+        
+        await update.message.reply_text(
+            f"📝 Тест по теме '{topic_name}':\n\n{formatted_test}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        return REVIEW_ASSESSMENT
+        
+    except Exception as e:
+        logger.error(f"Ошибка загрузки теста: {e}")
+        await update.message.reply_text(
+            "❌ Ошибка при загрузке теста",
+            reply_markup=edit_options_keyboard
+        )
+        return EDIT_TOPIC
+
+async def generate_and_review_assessment(update: Update, context: CallbackContext) -> int:
+    topic_name = context.user_data["current_topic"]
+    topic_dir = context.user_data["topic_dir"]
+    
+    # Показываем уведомление о генерации теста
+    message = await update.message.reply_text("🔄 Генерирую тест...")
+    
+    try:
+        # Генерируем тест
+        test = await generate_test_from_content(topic_name)
+        
+        if not test:
+            await message.edit_text("❌ Не удалось сгенерировать тест")
+            return EDIT_TOPIC
+        
+        # Сохраняем тест в контексте для предпросмотра
+        context.user_data["current_assessment"] = test
+        
+        # Форматируем тест для отображения
+        formatted_test = format_test_for_display(test)
+        
+        # Создаем клавиатуру с опциями
+        keyboard = [
+            [InlineKeyboardButton("Регенерировать с комментарием", callback_data="regenerate_assessment")],
+            [InlineKeyboardButton("Сохранить тест", callback_data="save_assessment")],
+            [InlineKeyboardButton("Отменить", callback_data="cancel_assessment")]
+        ]
+        
+        await message.edit_text(
+            f"📝 Сгенерированный тест по теме '{topic_name}':\n\n{formatted_test}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        return REVIEW_ASSESSMENT
+        
+    except Exception as e:
+        logger.error(f"Ошибка генерации теста: {e}")
+        await message.edit_text("❌ Ошибка при генерации теста")
+        return EDIT_TOPIC
+
+def format_test_for_display(test: Dict) -> str:
+    formatted = f"📚 Тема: {test['topic']}\n\n"
+    for i, question in enumerate(test["questions"], 1):
+        formatted += f"{i}. {question['question']}\n"
+        for j, option in enumerate(question["options"]):
+            prefix = "✓" if j == question["correct"] else "○"
+            formatted += f"   {prefix} {option}\n"
+        if "explanation" in question:
+            formatted += f"   💡 {question['explanation']}\n"
+        formatted += "\n"
+    return formatted
+
+async def back_to_edit(update: Update, context: CallbackContext) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    # Удаляем сообщение с подтверждением сохранения
+    await query.delete_message()
+    
+    # Показываем меню редактирования темы
+    await show_topic_info(update, context)
+    return EDIT_TOPIC
+
+async def handle_assessment_actions(update: Update, context: CallbackContext) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    action = query.data
+    topic_dir = context.user_data["topic_dir"]
+    assessment_path = os.path.join(topic_dir, ASSESSMENT_FILENAME)
+    
+    if action == "regenerate_assessment":
+        # Сохраняем текущую версию теста перед регенерацией
+        with open(assessment_path, "w", encoding="utf-8") as f:
+            json.dump(context.user_data["current_assessment"], f, ensure_ascii=False, indent=2)
+        
+        await query.message.reply_text(
+            "Введите ваш комментарий для улучшения теста:",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return GENERATE_ASSESSMENT
+        
+    elif action == "save_assessment":
+        # Сохраняем тест в файл
+        with open(assessment_path, "w", encoding="utf-8") as f:
+            json.dump(context.user_data["current_assessment"], f, ensure_ascii=False, indent=2)
+        
+        # Возвращаемся к редактированию темы
+        await show_topic_info(update, context)
+        return EDIT_TOPIC
+        
+    elif action == "cancel_assessment":
+        try:
+            # Удаляем файл теста, если он существует
+            if os.path.exists(assessment_path):
+                os.remove(assessment_path)
+                await query.message.reply_text("❌ Создание теста отменено, файл теста удалён.")
+            else:
+                await query.message.reply_text("❌ Создание теста отменено.")
+        except Exception as e:
+            logger.error(f"Ошибка при удалении теста: {e}")
+            await query.message.reply_text("❌ Ошибка при отмене теста.")
+        
+        # Возвращаемся к редактированию темы
+        await show_topic_info(update, context)
+        return EDIT_TOPIC
+    
+    elif action == "delete_assessment":
+        try:
+            if os.path.exists(assessment_path):
+                os.remove(assessment_path)
+                await query.edit_message_text("✅ Тест успешно удалён!")
+            else:
+                await query.edit_message_text("⚠️ Тест не найден, возможно уже удалён")
+            
+            # Возвращаемся к редактированию темы
+            await show_topic_info(update, context)
+            return EDIT_TOPIC
+        except Exception as e:
+            logger.error(f"Ошибка при удалении теста: {e}")
+            await query.edit_message_text("❌ Ошибка при удалении теста")
+            return REVIEW_ASSESSMENT
+    
+    elif action == "back_to_edit":
+        # Возвращаемся к редактированию темы
+        await show_topic_info(update, context)
+        return EDIT_TOPIC
+    
+    return REVIEW_ASSESSMENT
+
+
+
+async def regenerate_assessment_with_comment(update: Update, context: CallbackContext) -> int:
+    user_comment = update.message.text
+    topic_name = context.user_data["current_topic"]
+    topic_dir = context.user_data["topic_dir"]
+    
+    # Получаем текст PDF и выводы
+    pdf_path = os.path.join(topic_dir, PDF_FILENAME)
+    outcomes_path = os.path.join(topic_dir, OUTCOMES_FILENAME)
+    assesment_path = os.path.join(topic_dir, ASSESSMENT_FILENAME)
+    
+    try:
+        with open(assesment_path, "r", encoding="utf-8") as f:
+            assesment_text = f.read()
+        pdf_text = extract_text_from_pdf(pdf_path)
+        with open(outcomes_path, "r", encoding="utf-8") as f:
+            outcomes_text = f.read()
+        
+        # Формируем промпт с комментарием
+        prompt = f"""
+        Please review the test taking into account the following IMPORTANT user comment:
+        {user_comment}
+        YOU DO NOT HAVE TO WRITE ANYTHING BUT THE TEST ITSELF IN THE CORRECT JSON FORMAT. Format:""" + """
+        {
+          "topic": "Topic Title",
+          "questions": [
+            {
+              "question": "Текст вопроса",
+              "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
+              "correct": 0 (correct answer index),
+              "explanation": "Brief explanation of the correct answer"
+            }
+          ]
+        }
+        Questions should:
+        - Test understanding of key concepts from the document
+        - Be aligned with the learning outcomes
+        - Have one clear correct answer
+        - Be in the same language as the source document
+
+        Old test version:"{assesment_text}"
+        """
+        
+        # Генерируем новый тест
+        response = await ask_gpt_for_assesments(
+            pdf_text=pdf_text,
+            outcomes_text=outcomes_text,
+            additional_prompt=prompt
+        )
+        
+        # Очищаем и парсим ответ
+        cleaned_response = response.strip().replace("```json", "").replace("```", "")
+        test = json.loads(cleaned_response)
+        context.user_data["current_assessment"] = test
+        
+        # Показываем пересмотренный тест
+        formatted_test = format_test_for_display(test)
+        keyboard = [
+            [InlineKeyboardButton("Регенерировать с комментарием", callback_data="regenerate_assessment")],
+            [InlineKeyboardButton("Сохранить тест", callback_data="save_assessment")],
+            [InlineKeyboardButton("Отменить", callback_data="cancel_assessment")]
+        ]
+        
+        await update.message.reply_text(
+            f"📝 Пересмотренный тест по теме '{topic_name}':\n\n{formatted_test}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        return REVIEW_ASSESSMENT
+        
+    except Exception as e:
+        logger.error(f"Ошибка регенерации теста: {e}")
+        await update.message.reply_text(
+            "❌ Ошибка при регенерации теста",
+            reply_markup=edit_options_keyboard
+        )
+        return EDIT_TOPIC
+
 
 async def delete_confirm(update: Update, context: CallbackContext) -> int:
     text = update.message.text
@@ -1013,11 +1573,29 @@ def main() -> None:
                 CallbackQueryHandler(handle_topic_actions),
             ],
             LEARNER_TOPIC_DETAILS: [
+                CallbackQueryHandler(start_test, pattern="^start_test$"),
                 CallbackQueryHandler(handle_learner_actions)
             ],
             INSTRUCTOR_ACTIONS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, instructor_actions)
-            ]
+            ],
+            TAKING_TEST: [
+                CallbackQueryHandler(handle_test_answer, pattern=r"^test_answer_\d+_\d+$")
+            ],
+            TEST_RESULTS: [
+                CallbackQueryHandler(restart_test, pattern="^restart_test$"),
+                CallbackQueryHandler(back_to_topics, pattern="^back_to_topics$")
+            ],
+            WAITING_FOR_NEXT: [
+                CallbackQueryHandler(next_question_handler, pattern=r"^(next_question_\d+|show_results)$")
+            ],
+            GENERATE_ASSESSMENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, regenerate_assessment_with_comment)
+            ],
+            REVIEW_ASSESSMENT: [
+                CallbackQueryHandler(handle_assessment_actions),
+                CallbackQueryHandler(back_to_edit, pattern="^back_to_edit$")
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
