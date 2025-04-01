@@ -17,19 +17,16 @@ from telegram.ext import (
 from openai import OpenAI
 from PyPDF2 import PdfReader
 
-# Настройки
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация API
 API_BASE_URL = "http://localhost:8000"
 BOT_TOKEN = "7266424537:AAG7T8KReTaDvxsYq84FZuZce6L1nwwg7S0"
 OPENAI_API_KEY = "key"
 
-# Состояния бота
 (
     CHOOSING, REGISTER_NAME, REGISTER_PASS, LOGIN_NAME, LOGIN_PASS, 
     AUTHORIZED, UPLOAD_PDF, FROM_REG_TO_LOG, EDIT_TOPIC, EDIT_TOPIC_NAME, EDIT_CONCLUSIONS,
@@ -38,76 +35,70 @@ OPENAI_API_KEY = "key"
     TAKING_TEST, TEST_RESULTS, WAITING_FOR_NEXT, GENERATE_ASSESSMENT, REVIEW_ASSESSMENT, SAVE_ASSESSMENT
 ) = range(27)
 
-# Клавиатуры
-main_keyboard = ReplyKeyboardMarkup([["Регистрация", "Вход"]], one_time_keyboard=True)
+main_keyboard = ReplyKeyboardMarkup([["Register", "Login"]], one_time_keyboard=True)
 auth_keyboard = ReplyKeyboardMarkup(
-    [["Instructor", "Learner"], ["Выйти"]],
+    [["Instructor", "Learner"], ["Logout"]],
     one_time_keyboard=True
 )
 instructor_keyboard = ReplyKeyboardMarkup(
-    [["Новая тема", "Редактировать мои темы"], ["Назад"]],
+    [["New topic", "Edit my topics"], ["Back"]],
     one_time_keyboard=True
 )
-from_reg_to_log_keyboard = ReplyKeyboardMarkup([["Войти", "Регистрация"]], one_time_keyboard=True)
+from_reg_to_log_keyboard = ReplyKeyboardMarkup([["Login", "Register"]], one_time_keyboard=True)
 edit_options_keyboard = ReplyKeyboardMarkup(
-    [["Изменить название темы", "Изменить выводы"], 
-     ["Удалить документ", "Сохранить выводы"]],
+    [["Change topic name", "Edit learning outcomes"], 
+     ["Delete document", "Save learning outcomes"]],
     one_time_keyboard=True
 )
 edit_conclusions_keyboard = ReplyKeyboardMarkup(
-    [["Переписать выводы", "Регенерировать с комментарием"], ["Назад"]],
+    [["Rewrite learning outcomes", "Regenerate with comment"], ["Back"]],
     one_time_keyboard=True
 )
 delete_confirm_keyboard = ReplyKeyboardMarkup(
-    [["Да, удалить", "Нет, отменить"]],
+    [["Yes, delete", "No, cancel"]],
     one_time_keyboard=True
 )
 
-# Инициализация клиента OpenAI
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Базовая папка для хранения всех тем
 TOPICS_DIR = "topics"
 os.makedirs(TOPICS_DIR, exist_ok=True)
 
-# Фиксированные имена файлов
 PDF_FILENAME = "doc.pdf"
 OUTCOMES_FILENAME = "outcomes.txt"
 ASSESSMENT_FILENAME = "assessment.txt"
 
 async def start(update: Update, context: CallbackContext) -> int:
-    await update.message.reply_text("Выберите действие:", reply_markup=main_keyboard)
+    await update.message.reply_text("Choose an action:", reply_markup=main_keyboard)
     return CHOOSING
-
-
 
 async def start_with_command(update: Update, context: CallbackContext) -> int:
     command = update.message.text
-    if command == "Регистрация":
-        await update.message.reply_text("Введите имя для регистрации:", reply_markup=ReplyKeyboardRemove())
+    if command == "Register":
+        await update.message.reply_text("Enter a name to register:", reply_markup=ReplyKeyboardRemove())
         return REGISTER_NAME
-    elif command == "Вход":
-        await update.message.reply_text("Введите ваше имя:", reply_markup=ReplyKeyboardRemove())
+    elif command == "Login":
+        await update.message.reply_text("Enter your name:", reply_markup=ReplyKeyboardRemove())
         return LOGIN_NAME
     else:
-        await update.message.reply_text("Выберите действие:", reply_markup=main_keyboard)
+        await update.message.reply_text("Choose an action:", reply_markup=main_keyboard)
         return CHOOSING
 
 async def choose_action(update: Update, context: CallbackContext) -> int:
     text = update.message.text
-    if text == "Регистрация":
-        await update.message.reply_text("Введите имя для регистрации:", reply_markup=ReplyKeyboardRemove())
+    if text == "Register":
+        await update.message.reply_text("Enter a name to register:", reply_markup=ReplyKeyboardRemove())
         return REGISTER_NAME
-    elif text == "Вход":
-        await update.message.reply_text("Введите ваше имя:", reply_markup=ReplyKeyboardRemove())
+    elif text == "Login":
+        await update.message.reply_text("Enter your name:", reply_markup=ReplyKeyboardRemove())
         return LOGIN_NAME
-    await update.message.reply_text("Используйте кнопки!", reply_markup=main_keyboard)
+    await update.message.reply_text("Use the buttons!", reply_markup=main_keyboard)
     return CHOOSING
 
 async def register_name(update: Update, context: CallbackContext) -> int:
     name = update.message.text
     context.user_data["reg_name"] = name
-    await update.message.reply_text("Придумайте пароль:")
+    await update.message.reply_text("Create a password:")
     return REGISTER_PASS
 
 async def register_pass(update: Update, context: CallbackContext) -> int:
@@ -123,26 +114,46 @@ async def register_pass(update: Update, context: CallbackContext) -> int:
         
         if response.status_code == 200:
             token_data = response.json()
-            context.user_data["access_token"] = token_data["access_token"]
-            await show_auth_menu(update, f"Регистрация успешна, {name}!")
+            try:
+                response_t = requests.post(
+                    f"{API_BASE_URL}/auth",
+                    data={"username": name, "password": password}
+                )
+                
+                if response_t.status_code == 200:
+                    token_data = response_t.json()
+                    context.user_data["access_token"] = token_data["access_token"]
+                    await show_auth_menu(update, f"Welcome, {name}!")
+                    return AUTHORIZED
+                else:
+                    error_msg = response_t.json().get("detail", "Invalid login or password")
+                    await update.message.reply_text(f"Invalid login or password")
+                    return CHOOSING
+                    
+            except Exception as e:
+                logger.error(f"API error: {e}")
+                await update.message.reply_text("Error getting client token. Please try again later.", reply_markup=main_keyboard)
+                return CHOOSING
+            
             return AUTHORIZED
+
         elif response.status_code == 409:
-            await update.message.reply_text(f"Пользователь с логином {name} уже существует, хотите войти?", 
+            await update.message.reply_text(f"User with login {name} already exists, do you want to login?", 
                                           reply_markup=from_reg_to_log_keyboard)
             return FROM_REG_TO_LOG
         else:
-            error_msg = response.json().get("detail", "Ошибка регистрации")
-            await update.message.reply_text(f"Ошибка: {error_msg}")
+            error_msg = response.json().get("detail", "Registration error")
+            await update.message.reply_text(f"Error: {error_msg}")
             return CHOOSING
     except Exception as e:
         logger.error(f"API error: {e}")
-        await update.message.reply_text("Ошибка соединения с сервером. Попробуйте позже.", reply_markup=main_keyboard)
+        await update.message.reply_text("Server connection error. Please try again later.", reply_markup=main_keyboard)
         return CHOOSING
 
 async def login_name(update: Update, context: CallbackContext) -> int:
     name = update.message.text
     context.user_data["login_name"] = name
-    await update.message.reply_text("Введите пароль:")
+    await update.message.reply_text("Enter password:")
     return LOGIN_PASS
 
 async def login_pass(update: Update, context: CallbackContext) -> int:
@@ -159,20 +170,20 @@ async def login_pass(update: Update, context: CallbackContext) -> int:
         if response.status_code == 200:
             token_data = response.json()
             context.user_data["access_token"] = token_data["access_token"]
-            await show_auth_menu(update, f"Добро пожаловать, {name}!")
+            await show_auth_menu(update, f"Welcome, {name}!")
             return AUTHORIZED
         else:
-            error_msg = response.json().get("detail", "Неверный логин или пароль")
-            await update.message.reply_text(f"Неверный логин или пароль")
+            error_msg = response.json().get("detail", "Invalid login or password")
+            await update.message.reply_text(f"Invalid login or password")
             return CHOOSING
     except Exception as e:
         logger.error(f"API error: {e}")
-        await update.message.reply_text("Ошибка соединения с сервером. Попробуйте позже.", reply_markup=main_keyboard)
+        await update.message.reply_text("Server connection error. Please try again later.", reply_markup=main_keyboard)
         return CHOOSING
 
 async def from_reg_to_log(update: Update, context: CallbackContext) -> int:
     text = update.message.text
-    if text == "Войти":
+    if text == "Login":
         name = context.user_data["reg_name"]
         password = context.user_data["reg_password"]
         try:
@@ -184,21 +195,21 @@ async def from_reg_to_log(update: Update, context: CallbackContext) -> int:
             if response.status_code == 200:
                 token_data = response.json()
                 context.user_data["access_token"] = token_data["access_token"]
-                await show_auth_menu(update, f"Добро пожаловать, {name}!")
+                await show_auth_menu(update, f"Welcome, {name}!")
                 return AUTHORIZED
             else:
-                error_msg = response.json().get("detail", "Неверный логин или пароль")
-                await update.message.reply_text(f"Неверный логин или пароль", reply_markup=main_keyboard)
+                error_msg = response.json().get("detail", "Invalid login or password")
+                await update.message.reply_text(f"Invalid login or password", reply_markup=main_keyboard)
                 return CHOOSING
         except Exception as e:
             logger.error(f"API error: {e}")
-            await update.message.reply_text("Ошибка соединения с сервером. Попробуйте позже.", reply_markup=main_keyboard)
+            await update.message.reply_text("Server connection error. Please try again later.", reply_markup=main_keyboard)
             return CHOOSING
-    if text == "Регистрация":
-        await update.message.reply_text("Введите имя для регистрации:", reply_markup=ReplyKeyboardRemove())
+    if text == "Register":
+        await update.message.reply_text("Enter a name to register:", reply_markup=ReplyKeyboardRemove())
         return REGISTER_NAME
     else:
-        await update.message.reply_text("Выберите действие:", reply_markup=main_keyboard)
+        await update.message.reply_text("Choose an action:", reply_markup=main_keyboard)
         return CHOOSING
 
 async def show_auth_menu(update: Update, message: str) -> None:
@@ -206,17 +217,17 @@ async def show_auth_menu(update: Update, message: str) -> None:
 
 async def instructor_actions(update: Update, context: CallbackContext) -> int:
     text = update.message.text
-    if text == "Новая тема":
+    if text == "New topic":
         await update.message.reply_text(
-            "Загрузите PDF документ:",
+            "Upload PDF document:",
             reply_markup=ReplyKeyboardRemove()
         )
         return UPLOAD_PDF
-    elif text == "Редактировать мои темы":
-        return await view_topics_inline(update, context)  # Изменено на inline версию
-    elif text == "Назад":
+    elif text == "Edit my topics":
+        return await view_topics_inline(update, context)
+    elif text == "Back":
         await update.message.reply_text(
-            "Выберете желаемый статус:",
+            "Choose your role:",
             reply_markup=auth_keyboard
         )
         return AUTHORIZED
@@ -225,79 +236,72 @@ async def auth_actions(update: Update, context: CallbackContext) -> int:
     text = update.message.text
     if text == "Instructor":
         await update.message.reply_text(
-            "Выберите действие с темами:",
+            "Choose topic actions:",
             reply_markup=instructor_keyboard
         )
         return INSTRUCTOR_ACTIONS
     elif text == "Learner":
         return await view_learner_topics_inline(update, context)
-    elif text == "Выйти":
+    elif text == "Logout":
         context.user_data.clear()
-        await update.message.reply_text("Вы вышли из системы!", reply_markup=main_keyboard)
+        await update.message.reply_text("You have logged out!", reply_markup=main_keyboard)
         return CHOOSING
     else:
-        await update.message.reply_text("Используйте кнопки!", reply_markup=auth_keyboard)
+        await update.message.reply_text("Use the buttons!", reply_markup=auth_keyboard)
         return AUTHORIZED
 
 async def view_topics_inline(update: Update, context: CallbackContext) -> int:
     try:
         message = update.message or update.callback_query.message
         
-        # Получаем список всех тем
         all_topics = [name for name in os.listdir(TOPICS_DIR) 
                     if os.path.isdir(os.path.join(TOPICS_DIR, name))]
         
         if not all_topics:
-            await message.reply_text("У вас пока нет сохраненных тем.")
+            await message.reply_text("You don't have any saved topics yet.")
             return INSTRUCTOR_ACTIONS
         
-        # Сохраняем список тем и текущую страницу в контексте
         context.user_data.setdefault('topics_pagination', {'page': 0, 'topics': all_topics})
         page = context.user_data['topics_pagination']['page']
         topics = context.user_data['topics_pagination']['topics']
         
-        # Разбиваем на страницы по 8 тем
         PAGE_SIZE = 8
         start = page * PAGE_SIZE
         end = start + PAGE_SIZE
         page_topics = topics[start:end]
         
-        # Создаем клавиатуру
         keyboard = []
         for topic in page_topics:
             topic_body = topic.replace(' ', '_').replace('/', '').replace('\\', '')[:40]
             safe_callback = f"topic_{topic_body}"
             keyboard.append([InlineKeyboardButton(topic, callback_data=safe_callback)])
         
-        # Добавляем кнопки навигации
         nav_buttons = []
         if page > 0:
-            nav_buttons.append(InlineKeyboardButton("◀ Назад", callback_data="prev_page"))
+            nav_buttons.append(InlineKeyboardButton("◀ Back", callback_data="prev_page"))
         if end < len(topics):
-            nav_buttons.append(InlineKeyboardButton("Вперед ▶", callback_data="next_page"))
+            nav_buttons.append(InlineKeyboardButton("Next ▶", callback_data="next_page"))
         
         if nav_buttons:
             keyboard.append(nav_buttons)
         
-        # Добавляем кнопку "Выйти"
-        keyboard.append([InlineKeyboardButton("Выйти", callback_data="exit")])
+        keyboard.append([InlineKeyboardButton("Exit", callback_data="exit")])
         
-        # Отправляем/редактируем сообщение
         if update.callback_query:
             await update.callback_query.edit_message_text(
-                "Выберите тему для редактирования:",
+                "Select a topic to edit:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         else:
             await message.reply_text(
-                "Выберите тему для редактирования:",
+                "Select a topic to edit:",
                 reply_markup=InlineKeyboardMarkup(keyboard))
         
         return VIEW_TOPICS_INLINE
         
     except Exception as e:
         logger.error(f"Error listing topics: {e}")
-        await message.reply_text("Ошибка при получении списка тем.")
+        await message.reply_text("Error getting topics list.")
         return INSTRUCTOR_ACTIONS
 
 async def handle_pagination(update: Update, context: CallbackContext) -> int:
@@ -313,19 +317,17 @@ async def handle_pagination(update: Update, context: CallbackContext) -> int:
         pagination['page'] += 1
     elif action == "exit":
         context.user_data.clear()
-        await query.edit_message_text("Вы вышли из режима редактирования.")
+        await query.edit_message_text("You exited edit mode.")
         
-        # Используем заранее созданную клавиатуру вместо функции
         await query.message.reply_text(
-            "Выберите действие с темами:",
-            reply_markup=instructor_keyboard  # Используем предопределенную клавиатуру
+            "Choose topic actions:",
+            reply_markup=instructor_keyboard
         )
         
         return INSTRUCTOR_ACTIONS
     
     context.user_data['topics_pagination'] = pagination
     return await view_topics_inline(update, context)
-
 
 async def topic_selected(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
@@ -338,35 +340,32 @@ async def topic_selected(update: Update, context: CallbackContext) -> int:
         topic_dir = os.path.join(TOPICS_DIR, topic_name)
         
         if not os.path.exists(topic_dir):
-            await query.edit_message_text("Тема не найдена!")
+            await query.edit_message_text("Topic not found!")
             return await view_topics_inline(update, context)
         
-        # Чтение выводов
         outcomes_path = os.path.join(topic_dir, OUTCOMES_FILENAME)
-        conclusions = "Нет выводов"
+        conclusions = "No learning outcomes"
         if os.path.exists(outcomes_path):
             with open(outcomes_path, "r", encoding="utf-8") as f:
                 content = f.read().split('\n', 1)
                 if len(content) > 1:
                     conclusions = content[1]
         
-        # Отправка сообщения через query
         await query.edit_message_text(
-            f"Тема: {topic_name}\n\nВыводы:\n{conclusions[:3000]}",
+            f"Topic: {topic_name}\n\nLearning outcomes:\n{conclusions[:3000]}",
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("Скачать документ", callback_data="download_doc"),
-                    InlineKeyboardButton("Изменить тему", callback_data="edit_topic")
+                    InlineKeyboardButton("Download document", callback_data="download_doc"),
+                    InlineKeyboardButton("Edit topic", callback_data="edit_topic")
                 ],
-                [InlineKeyboardButton("Назад", callback_data="back_to_topics")]
+                [InlineKeyboardButton("Back", callback_data="back_to_topics")]
             ])
         )
         return TOPIC_DETAILS
     except Exception as e:
         logger.error(f"Error in topic_selected: {e}")
-        await query.edit_message_text("Произошла ошибка при загрузке темы")
+        await query.edit_message_text("Error loading topic")
         return await view_topics_inline(update, context)
-
 
 async def handle_topic_actions(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
@@ -380,19 +379,17 @@ async def handle_topic_actions(update: Update, context: CallbackContext) -> int:
         try:
             doc_path = os.path.join(topic_dir, PDF_FILENAME)
             
-            # Отправляем документ как ответ на текущее сообщение
             await query.message.reply_document(
                 document=open(doc_path, "rb"),
                 filename=f"{topic_name}.pdf",
                 reply_to_message_id=query.message.message_id
             )
             
-            # Явно возвращаем текущее состояние
             return TOPIC_DETAILS
             
         except Exception as e:
             logger.error(f"Error sending document: {e}")
-            await query.message.reply_text("Ошибка при отправке документа")
+            await query.message.reply_text("Error sending document")
             return await topic_selected(update, context)
     
     elif action == "edit_topic":
@@ -409,17 +406,13 @@ async def handle_topic_actions(update: Update, context: CallbackContext) -> int:
             
         except Exception as e:
             logger.error(f"Error loading topic: {e}")
-            await query.message.reply_text("Ошибка загрузки темы")
+            await query.message.reply_text("Error loading topic")
             return await topic_selected(update, context)
     
     elif action == "back_to_topics":
         return await view_topics_inline(update, context)
     
     return TOPIC_DETAILS
-
-
-
-
 
 async def view_learner_topics_inline(update: Update, context: CallbackContext) -> int:
     try:
@@ -429,7 +422,7 @@ async def view_learner_topics_inline(update: Update, context: CallbackContext) -
                     if os.path.isdir(os.path.join(TOPICS_DIR, name))]
         
         if not all_topics:
-            await message.reply_text("Пока нет доступных тем для изучения.")
+            await message.reply_text("No topics available for learning yet.")
             return AUTHORIZED
         
         context.user_data['learner_topics_pagination'] = {
@@ -441,7 +434,7 @@ async def view_learner_topics_inline(update: Update, context: CallbackContext) -
     except Exception as e:
         logger.error(f"Error listing topics: {e}")
         message = update.message or update.callback_query.message
-        await message.reply_text("Ошибка при получении списка тем.")
+        await message.reply_text("Error getting topics list.")
         return AUTHORIZED
 
 async def show_learner_topics_page(update: Update, context: CallbackContext) -> int:
@@ -461,28 +454,25 @@ async def show_learner_topics_page(update: Update, context: CallbackContext) -> 
     
     nav_buttons = []
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton("◀ Назад", callback_data="learner_prev_page"))
+        nav_buttons.append(InlineKeyboardButton("◀ Back", callback_data="learner_prev_page"))
     if end < len(topics):
-        nav_buttons.append(InlineKeyboardButton("Вперед ▶", callback_data="learner_next_page"))
+        nav_buttons.append(InlineKeyboardButton("Next ▶", callback_data="learner_next_page"))
     
     if nav_buttons:
         keyboard.append(nav_buttons)
     
-    keyboard.append([InlineKeyboardButton("Выйти", callback_data="learner_exit")])
+    keyboard.append([InlineKeyboardButton("Exit", callback_data="learner_exit")])
     
     if update.callback_query:
         await update.callback_query.edit_message_text(
-            "Выберите тему для изучения:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+            "Select a topic to learn:",
+            reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await (update.message or update.callback_query.message).reply_text(
-            "Выберите тему для изучения:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+            "Select a topic to learn:",
+            reply_markup=InlineKeyboardMarkup(keyboard))
     
     return VIEW_LEARNER_TOPICS_INLINE
-
 
 async def handle_learner_pagination(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
@@ -496,9 +486,9 @@ async def handle_learner_pagination(update: Update, context: CallbackContext) ->
     elif action == "learner_next_page":
         pagination['page'] += 1
     elif action == "learner_exit":
-        await query.edit_message_text("Вы вышли из режима просмотра тем.")
+        await query.edit_message_text("You exited topic viewing mode.")
         await query.message.reply_text(
-            "Выберите желаемый статус:",
+            "Choose your role:",
             reply_markup=auth_keyboard
         )
         return AUTHORIZED
@@ -517,39 +507,37 @@ async def learner_topic_selected(update: Update, context: CallbackContext) -> in
         topic_dir = os.path.join(TOPICS_DIR, topic_name)
         
         if not os.path.exists(topic_dir):
-            await query.edit_message_text("Тема не найдена!")
+            await query.edit_message_text("Topic not found!")
             return await show_learner_topics_page(update, context)
         
         outcomes_path = os.path.join(topic_dir, OUTCOMES_FILENAME)
-        conclusions = "Нет выводов"
+        conclusions = "No learning outcomes"
         if os.path.exists(outcomes_path):
             with open(outcomes_path, "r", encoding="utf-8") as f:
                 content = f.read().split('\n', 1)
                 if len(content) > 1:
                     conclusions = content[1]
         
-        # Обновленная клавиатура с кнопкой теста
         has_assessment = os.path.exists(os.path.join(topic_dir, ASSESSMENT_FILENAME))
         if(has_assessment):
             keyboard = [
-                [InlineKeyboardButton("Пройти тест", callback_data="start_test")],
-                [InlineKeyboardButton("Скачать документ", callback_data="learner_download")],
-                [InlineKeyboardButton("Назад к списку тем", callback_data="learner_back")]
+                [InlineKeyboardButton("Take test", callback_data="start_test")],
+                [InlineKeyboardButton("Download document", callback_data="learner_download")],
+                [InlineKeyboardButton("Back to topics list", callback_data="learner_back")]
             ]
         else:
             keyboard = [
-                [InlineKeyboardButton("Скачать документ", callback_data="learner_download")],
-                [InlineKeyboardButton("Назад к списку тем", callback_data="learner_back")]
+                [InlineKeyboardButton("Download document", callback_data="learner_download")],
+                [InlineKeyboardButton("Back to topics list", callback_data="learner_back")]
             ]
         
         await query.edit_message_text(
-            f"Тема: {topic_name}\n\nВыводы:\n{conclusions[:3000]}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+            f"Topic: {topic_name}\n\nLearning outcomes:\n{conclusions[:3000]}",
+            reply_markup=InlineKeyboardMarkup(keyboard))
         return LEARNER_TOPIC_DETAILS
     except Exception as e:
         logger.error(f"Error in learner_topic_selected: {e}")
-        await query.edit_message_text("Произошла ошибка при загрузке темы")
+        await query.edit_message_text("Error loading topic")
         return await show_learner_topics_page(update, context)
 
 async def handle_learner_actions(update: Update, context: CallbackContext) -> int:
@@ -564,19 +552,17 @@ async def handle_learner_actions(update: Update, context: CallbackContext) -> in
             topic_dir = os.path.join(TOPICS_DIR, topic_name)
             doc_path = os.path.join(topic_dir, PDF_FILENAME)
             
-            # Отправляем документ как ответ на текущее сообщение
             await query.message.reply_document(
                 document=open(doc_path, "rb"),
                 filename=f"{topic_name}.pdf",
                 reply_to_message_id=query.message.message_id
             )
             
-            # Возвращаем текущее состояние без изменений
             return LEARNER_TOPIC_DETAILS
             
         except Exception as e:
             logger.error(f"Error sending document: {e}")
-            await query.message.reply_text("Ошибка при отправке документа")
+            await query.message.reply_text("Error sending document")
             return await learner_topic_selected(update, context)
     
     elif action == "learner_back":
@@ -584,23 +570,19 @@ async def handle_learner_actions(update: Update, context: CallbackContext) -> in
     
     return LEARNER_TOPIC_DETAILS
 
-
-    
 async def view_topics(update: Update, context: CallbackContext) -> int:
     try:
-        # Получаем список всех тем (папок в директории TOPICS_DIR)
         topics = [name for name in os.listdir(TOPICS_DIR) 
                  if os.path.isdir(os.path.join(TOPICS_DIR, name))]
         
         if not topics:
             await update.message.reply_text(
-                "У вас пока нет сохраненных тем.",
+                "You don't have any saved topics yet.",
                 reply_markup=auth_keyboard
             )
             return AUTHORIZED
         
-        # Формируем сообщение со списком тем
-        message = "Ваши сохраненные темы:\n\n" + "\n".join(
+        message = "Your saved topics:\n\n" + "\n".join(
             f"{i+1}. {topic}" for i, topic in enumerate(topics)
         )
         
@@ -613,13 +595,12 @@ async def view_topics(update: Update, context: CallbackContext) -> int:
     except Exception as e:
         logger.error(f"Error listing topics: {e}")
         await update.message.reply_text(
-            "Произошла ошибка при получении списка тем.",
+            "Error getting topics list.",
             reply_markup=auth_keyboard
         )
         return AUTHORIZED
 
 def extract_text_from_pdf(pdf_path: str) -> str:
-    """Извлекает текст из PDF файла"""
     with open(pdf_path, "rb") as f:
         reader = PdfReader(f)
         text = ""
@@ -628,7 +609,6 @@ def extract_text_from_pdf(pdf_path: str) -> str:
     return text
 
 async def ask_gpt(pdf_text: str, additional_prompt: str = "") -> str:
-    """Отправляет текст из PDF в GPT и возвращает ответ"""
     try:
         prompt = f'{additional_prompt} Document is next:\n\n"{pdf_text}"\n\n'
         
@@ -644,7 +624,7 @@ async def ask_gpt(pdf_text: str, additional_prompt: str = "") -> str:
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"OpenAI error: {e}")
-        return "Произошла ошибка при обработке запроса OpenAI."
+        return "Error processing OpenAI request."
 
 async def start_test(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -652,13 +632,11 @@ async def start_test(update: Update, context: CallbackContext):
     
     topic_name = context.user_data["current_learner_topic"]
     
-    # Загружаем тест из файла
     test = await load_assessment(topic_name)
     if not test:
-        await query.message.reply_text("❌ Тест для этой темы не найден")
+        await query.message.reply_text("❌ Test not found for this topic")
         return LEARNER_TOPIC_DETAILS
     
-    # Сохраняем тест в контексте
     context.user_data["current_test"] = {
         **test,
         "current_question": 0,
@@ -666,7 +644,6 @@ async def start_test(update: Update, context: CallbackContext):
         "answers": []
     }
     
-    # Показываем первый вопрос
     await show_question(
         update, 
         context,
@@ -677,7 +654,6 @@ async def start_test(update: Update, context: CallbackContext):
     return TAKING_TEST
 
 async def show_question(update: Update, context: CallbackContext, question: Dict, q_num: int, total: int):
-    # Сохраняем текущий вопрос в контексте
     context.user_data['current_test']['current_question'] = q_num
     
     keyboard = [
@@ -686,8 +662,8 @@ async def show_question(update: Update, context: CallbackContext, question: Dict
     ]
     
     text = (
-        f"📚 Тема: {context.user_data['current_test']['topic']}\n\n"
-        f"❓ Вопрос {q_num+1}/{total}:\n"
+        f"📚 Topic: {context.user_data['current_test']['topic']}\n\n"
+        f"❓ Question {q_num+1}/{total}:\n"
         f"{question['question']}"
     )
     
@@ -710,7 +686,6 @@ async def handle_test_answer(update: Update, context: CallbackContext):
     await query.answer()
     
     try:
-        # Разбираем callback_data
         _, _, q_num, answer_idx = query.data.split('_')
         q_num = int(q_num)
         answer_idx = int(answer_idx)
@@ -718,7 +693,6 @@ async def handle_test_answer(update: Update, context: CallbackContext):
         test_data = context.user_data['current_test']
         question = test_data['questions'][q_num]
         
-        # Сохраняем ответ
         test_data.setdefault('answers', []).append({
             'question': question['question'],
             'user_answer': answer_idx,
@@ -726,41 +700,37 @@ async def handle_test_answer(update: Update, context: CallbackContext):
             'explanation': question.get('explanation', '')
         })
 
-        # Проверяем ответ
         if answer_idx == question['correct']:
             test_data['score'] += 1
-            feedback = "✅ Верно!"
+            feedback = "✅ Correct!"
         else:
             correct_option = question['options'][question['correct']]
-            feedback = f"❌ Неверно! Правильный ответ: {correct_option}"
+            feedback = f"❌ Wrong! Correct answer: {correct_option}"
 
         if 'explanation' in question:
-            feedback += f"\n\n💡 Пояснение: {question['explanation']}"
+            feedback += f"\n\n💡 Explanation: {question['explanation']}"
 
-        # Создаем клавиатуру с кнопкой "Следующий вопрос"
         keyboard = []
         next_q = q_num + 1
         
         if next_q < len(test_data['questions']):
-            keyboard.append([InlineKeyboardButton("Следующий вопрос →", callback_data=f"next_question_{next_q}")])
+            keyboard.append([InlineKeyboardButton("Next question →", callback_data=f"next_question_{next_q}")])
         else:
-            keyboard.append([InlineKeyboardButton("Посмотреть результаты", callback_data="show_results")])
+            keyboard.append([InlineKeyboardButton("View results", callback_data="show_results")])
 
-        # Показываем результат с кнопкой
         await query.edit_message_text(
             f"{feedback}\n\n"
-            f"Вопрос {q_num+1}/{len(test_data['questions'])}\n"
+            f"Question {q_num+1}/{len(test_data['questions'])}\n"
             f"{question['question']}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         
-        return WAITING_FOR_NEXT  # Новое состояние ожидания
+        return WAITING_FOR_NEXT
 
     except Exception as e:
         logger.error(f"Error in handle_test_answer: {e}")
-        await query.message.reply_text("Произошла ошибка при обработке ответа")
+        await query.message.reply_text("Error processing answer")
         return TAKING_TEST
-
 
 async def next_question_handler(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -788,9 +758,8 @@ async def next_question_handler(update: Update, context: CallbackContext):
             
     except Exception as e:
         logger.error(f"Error in next_question_handler: {e}")
-        await query.message.reply_text("Произошла ошибка при переходе к следующему вопросу")
+        await query.message.reply_text("Error moving to next question")
         return TAKING_TEST
-
 
 async def show_test_results(update: Update, context: CallbackContext):
     test_data = context.user_data["current_test"]
@@ -798,26 +767,23 @@ async def show_test_results(update: Update, context: CallbackContext):
     total = len(test_data["questions"])
     percentage = score/total*100
     
-    # Формируем сообщение с результатами
     result_message = (
-        f"📊 Результаты теста по теме '{test_data['topic']}':\n"
-        f"🔹 Правильных ответов: {score}/{total}\n"
-        f"🔹 Успешность: {percentage:.0f}%\n\n"
+        f"📊 Test results for '{test_data['topic']}':\n"
+        f"🔹 Correct answers: {score}/{total}\n"
+        f"🔹 Success rate: {percentage:.0f}%\n\n"
     )
     
-    # Добавляем анализ по вопросам
     if percentage < 70:
-        result_message += "📝 Рекомендуется повторить материал:\n"
+        result_message += "📝 Recommended to review material:\n"
         for answer in test_data["answers"]:
             if answer["user_answer"] != answer["correct_answer"]:
                 result_message += f"\n• {answer['question']}\n"
                 if answer["explanation"]:
                     result_message += f"  💡 {answer['explanation']}\n"
     
-    # Добавляем кнопки
     keyboard = [
-        [InlineKeyboardButton("Пройти тест ещё раз", callback_data="restart_test")],
-        [InlineKeyboardButton("Вернуться к темам", callback_data="back_to_topics")]
+        [InlineKeyboardButton("Retake test", callback_data="restart_test")],
+        [InlineKeyboardButton("Back to topics", callback_data="back_to_topics")]
     ]
     
     await update.callback_query.message.reply_text(
@@ -829,12 +795,10 @@ async def restart_test(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     
-    # Очищаем предыдущие результаты
     context.user_data["current_test"]["current_question"] = 0
     context.user_data["current_test"]["score"] = 0
     context.user_data["current_test"]["answers"] = []
     
-    # Начинаем тест заново
     await show_question(
         update, 
         context,
@@ -843,29 +807,24 @@ async def restart_test(update: Update, context: CallbackContext):
         len(context.user_data["current_test"]["questions"]))
     return TAKING_TEST
 
-
 async def generate_test_from_content(topic_name: str) -> Dict:
-    # Получаем текст PDF и выводы
     topic_dir = os.path.join(TOPICS_DIR, topic_name)
     pdf_path = os.path.join(topic_dir, PDF_FILENAME)
     outcomes_path = os.path.join(topic_dir, OUTCOMES_FILENAME)
     
     try:
-        # Извлекаем текст из PDF
         pdf_text = extract_text_from_pdf(pdf_path)
         
-        # Читаем выводы
         with open(outcomes_path, "r", encoding="utf-8") as f:
             outcomes_text = f.read()
         
-        # Формируем промпт для GPT
         prompt = """
         You are given a document and the desired learning outcomes that learners should learn by reading this document. Your task is to generate a multiple choice test with one question for each outcome. Your answer is processed automatically and YOU DO NOT HAVE TO WRITE ANYTHING BUT THE TEST ITSELF IN THE CORRECT JSON FORMAT. Format:
         {
           "topic": "Topic Title",
           "questions": [
             {
-              "question": "Текст вопроса",
+              "question": "Question text",
               "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
               "correct": 0 (correct answer index),
               "explanation": "Brief explanation of the correct answer"
@@ -879,20 +838,18 @@ async def generate_test_from_content(topic_name: str) -> Dict:
         - Be in the same language as the source document
         """
         
-        # Отправляем в GPT
         response = await ask_gpt_for_assesments(
             pdf_text=pdf_text,
             outcomes_text=outcomes_text,
             additional_prompt=prompt
         )
         
-        # Очищаем ответ от возможных некорректных символов
         cleaned_response = response.strip().replace("```json", "").replace("```", "")
         
         return json.loads(cleaned_response)
     
     except Exception as e:
-        logger.error(f"Ошибка генерации теста: {e}")
+        logger.error(f"Test generation error: {e}")
         return None
 
 async def load_assessment(topic_name: str) -> Dict:
@@ -906,7 +863,6 @@ async def load_assessment(topic_name: str) -> Dict:
         return json.load(f)
 
 async def ask_gpt_for_assesments(pdf_text: str, outcomes_text: str, additional_prompt: str = "") -> str:
-    """Отправляет текст из PDF в GPT и возвращает ответ"""
     try:
         prompt = f'{additional_prompt}\n Document is next:\n\n"{pdf_text}"\n\nOutcomes are next:\n\n"{outcomes_text}"\n\n'
         
@@ -922,63 +878,51 @@ async def ask_gpt_for_assesments(pdf_text: str, outcomes_text: str, additional_p
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"OpenAI error: {e}")
-        return "Произошла ошибка при обработке запроса OpenAI."
+        return "Error processing OpenAI request."
 
 def sanitize_topic_name(topic: str) -> str:
-    """Очищает название темы от недопустимых символов"""
     invalid_chars = '<>:"/\\|?*'
     for char in invalid_chars:
         topic = topic.replace(char, '_')
-    return topic[:40].strip()  # Ограничение длины названия темы
+    return topic[:40].strip()
 
 async def show_topic_info(update: Update, context: CallbackContext) -> None:
     topic_name = context.user_data.get("current_topic", "Untitled")
     gpt_response = context.user_data.get("gpt_response", "")
     
-    # Извлекаем выводы
-    conclusions = gpt_response.split('\n', 1)[1] if '\n' in gpt_response else "Нет выводов"
+    conclusions = gpt_response.split('\n', 1)[1] if '\n' in gpt_response else "No learning outcomes"
     
-    # Проверяем, есть ли уже тест
     topic_dir = context.user_data["topic_dir"]
     has_assessment = os.path.exists(os.path.join(topic_dir, ASSESSMENT_FILENAME))
     
-    # Создаем клавиатуру
     keyboard = [
-        ["Изменить название темы", "Изменить выводы"],
-        ["Создать тест" if not has_assessment else "Просмотреть тест", "Удалить документ"],
-        ["Сохранить выводы"]
+        ["Change topic name", "Edit learning outcomes"],
+        ["Create test" if not has_assessment else "View test", "Delete document"],
+        ["Save learning outcomes"]
     ]
     
-    message = f"Текущая тема: {topic_name}\n\nВыводы:\n{conclusions[:4000]}"
+    message = f"Current topic: {topic_name}\n\nLearning outcomes:\n{conclusions[:4000]}"
     
     if update.message:
         await update.message.reply_text(
             message,
-            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-        )
+            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True))
     elif update.callback_query:
         await update.callback_query.message.reply_text(
             message,
-            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-        )
+            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True))
     
     if len(conclusions) > 4000:
         if update.message:
             await update.message.reply_text(
-                "Полный текст выводов сохранен в файл.",
-                reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-            )
+                "Full learning outcomes text saved to file.",
+                reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True))
         elif update.callback_query:
             await update.callback_query.message.reply_text(
-                "Полный текст выводов сохранен в файл.",
-                reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-            )
+                "Full learning outcomes text saved to file.",
+                reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True))
 
 def get_unique_topic_dir(base_dir: str, topic_name: str) -> tuple[str, bool]:
-    """
-    Находит уникальное имя для папки темы, добавляя (n) при необходимости.
-    Возвращает кортеж: (уникальный путь, был ли добавлен номер)
-    """
     original_name = topic_name
     counter = 1
     was_renamed = False
@@ -988,25 +932,20 @@ def get_unique_topic_dir(base_dir: str, topic_name: str) -> tuple[str, bool]:
         if not os.path.exists(topic_dir):
             return topic_dir, was_renamed
         
-        # Если папка уже существует, пробуем добавить (n)
         topic_name = f"{original_name} ({counter})"
         counter += 1
         was_renamed = True
 
-
 async def upload_pdf(update: Update, context: CallbackContext) -> int:
     if document := update.message.document:
         if document.mime_type == "application/pdf":
-            # Сохраняем PDF во временную папку для обработки
             temp_pdf_path = os.path.join(TOPICS_DIR, f"temp_{document.file_name}")
             file = await context.bot.get_file(document.file_id)
             await file.download_to_drive(temp_pdf_path)
             
             try:
-                # Извлекаем текст из PDF
                 pdf_text = extract_text_from_pdf(temp_pdf_path)
                 
-                # Дополнительный промпт
                 additional_prompt = (
                     "Analyze this document and write in first line document title "
                     "(what you would call the general topic of the document, if the document already has a general title, use it) "
@@ -1016,50 +955,40 @@ async def upload_pdf(update: Update, context: CallbackContext) -> int:
                     "in first line and a numbered list. Answer in language on which the document is written."
                 )
                 
-                # Отправляем в GPT
-                await update.message.reply_text("Обрабатываю документ с помощью GPT...")
+                await update.message.reply_text("Processing document with GPT...")
                 gpt_response = await ask_gpt(pdf_text, additional_prompt)
                 
-                # Извлекаем название темы из первой строки ответа GPT
                 first_line_end = gpt_response.find('\n')
                 if first_line_end == -1:
                     topic_name = "Untitled"
                 else:
                     topic_name = gpt_response[:first_line_end].strip()
                 
-                # Очищаем название темы от недопустимых символов
                 topic_name = sanitize_topic_name(topic_name)
                 
-                # Получаем уникальное имя для папки темы
                 topic_dir, was_renamed = get_unique_topic_dir(TOPICS_DIR, topic_name)
                 
-                # Если пришлось добавить номер, сообщаем пользователю
                 if was_renamed:
                     new_topic_name = os.path.basename(topic_dir)
                     await update.message.reply_text(
-                        f"Тема с названием '{topic_name}' уже существует. "
-                        f"Будет использовано имя '{new_topic_name}'"
+                        f"Topic with name '{topic_name}' already exists. "
+                        f"Will use name '{new_topic_name}'"
                     )
                     topic_name = new_topic_name
                 
-                # Создаем папку для этой темы
                 os.makedirs(topic_dir, exist_ok=True)
                 
-                # Переносим PDF в папку темы с фиксированным именем
                 final_pdf_path = os.path.join(topic_dir, PDF_FILENAME)
                 os.rename(temp_pdf_path, final_pdf_path)
                 
-                # Сохраняем ответ GPT с фиксированным именем
                 response_filename = os.path.join(topic_dir, OUTCOMES_FILENAME)
                 with open(response_filename, "w", encoding="utf-8") as f:
                     f.write(gpt_response)
                 
-                # Сохраняем информацию в context
                 context.user_data["current_topic"] = topic_name
                 context.user_data["topic_dir"] = topic_dir
                 context.user_data["gpt_response"] = gpt_response
                 
-                # Отправляем ответ пользователю
                 await show_topic_info(update, context)
                 return EDIT_TOPIC
             except Exception as e:
@@ -1067,37 +996,35 @@ async def upload_pdf(update: Update, context: CallbackContext) -> int:
                 if os.path.exists(temp_pdf_path):
                     os.remove(temp_pdf_path)
                 await update.message.reply_text(
-                    "Ошибка при обработке PDF файла.",
+                    "Error processing PDF file.",
                     reply_markup=auth_keyboard
                 )
                 return AUTHORIZED
     
-    await update.message.reply_text("Отправьте PDF файл:", reply_markup=auth_keyboard)
+    await update.message.reply_text("Send PDF file:", reply_markup=auth_keyboard)
     return UPLOAD_PDF
 
 async def edit_topic(update: Update, context: CallbackContext) -> int:
     text = update.message.text
-    if text == "Изменить название темы":
-        await update.message.reply_text("Введите новое название темы:")
+    if text == "Change topic name":
+        await update.message.reply_text("Enter new topic name:")
         return EDIT_TOPIC_NAME
-    elif text == "Изменить выводы":
-        await update.message.reply_text("Выберите действие:", reply_markup=edit_conclusions_keyboard)
+    elif text == "Edit learning outcomes":
+        await update.message.reply_text("Choose action:", reply_markup=edit_conclusions_keyboard)
         return EDIT_CONCLUSIONS
-    elif text == "Удалить документ":
+    elif text == "Delete document":
         await update.message.reply_text(
-            "Вы уверены, что хотите удалить этот документ и все связанные с ним данные?",
+            "Are you sure you want to delete this document and all related data?",
             reply_markup=delete_confirm_keyboard
         )
         return DELETE_CONFIRM
-    elif text == "Создать тест":
-        # Генерируем тест при подтверждении темы
+    elif text == "Create test":
         return await generate_and_review_assessment(update, context)
-    elif text == "Просмотреть тест":
-        # Показываем существующий тест
+    elif text == "View test":
         return await view_existing_assessment(update, context)
-    elif text == "Сохранить выводы":
+    elif text == "Save learning outcomes":
         await update.message.reply_text(
-            "Тема сохранена",
+            "Topic saved",
             reply_markup=instructor_keyboard
         )
         return INSTRUCTOR_ACTIONS
@@ -1105,42 +1032,37 @@ async def edit_topic(update: Update, context: CallbackContext) -> int:
         await show_topic_info(update, context)
         return EDIT_TOPIC
 
-
 async def view_existing_assessment(update: Update, context: CallbackContext) -> int:
     topic_name = context.user_data["current_topic"]
     topic_dir = context.user_data["topic_dir"]
     
     try:
-        # Загружаем тест из файла
         test = await load_assessment(topic_name)
         if not test:
-            await update.message.reply_text("❌ Тест для этой темы не найден")
+            await update.message.reply_text("❌ Test not found for this topic")
             return EDIT_TOPIC
         
-        # Сохраняем тест в контексте
         context.user_data["current_assessment"] = test
         
-        # Форматируем тест для отображения
         formatted_test = format_test_for_display(test)
         
-        # Создаем клавиатуру с опциями
         keyboard = [
-            [InlineKeyboardButton("Регенерировать тест", callback_data="regenerate_assessment")],
-            [InlineKeyboardButton("Удалить тест", callback_data="delete_assessment")],
-            [InlineKeyboardButton("Назад к редактированию", callback_data="back_to_edit")]
+            [InlineKeyboardButton("Regenerate test", callback_data="regenerate_assessment")],
+            [InlineKeyboardButton("Delete test", callback_data="delete_assessment")],
+            [InlineKeyboardButton("Back to editing", callback_data="back_to_edit")]
         ]
         
         await update.message.reply_text(
-            f"📝 Тест по теме '{topic_name}':\n\n{formatted_test}",
+            f"📝 Test for topic '{topic_name}':\n\n{formatted_test}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         
         return REVIEW_ASSESSMENT
         
     except Exception as e:
-        logger.error(f"Ошибка загрузки теста: {e}")
+        logger.error(f"Test loading error: {e}")
         await update.message.reply_text(
-            "❌ Ошибка при загрузке теста",
+            "❌ Error loading test",
             reply_markup=edit_options_keyboard
         )
         return EDIT_TOPIC
@@ -1149,44 +1071,39 @@ async def generate_and_review_assessment(update: Update, context: CallbackContex
     topic_name = context.user_data["current_topic"]
     topic_dir = context.user_data["topic_dir"]
     
-    # Показываем уведомление о генерации теста
-    message = await update.message.reply_text("🔄 Генерирую тест...")
+    message = await update.message.reply_text("🔄 Generating test...")
     
     try:
-        # Генерируем тест
         test = await generate_test_from_content(topic_name)
         
         if not test:
-            await message.edit_text("❌ Не удалось сгенерировать тест")
+            await message.edit_text("❌ Failed to generate test")
             return EDIT_TOPIC
         
-        # Сохраняем тест в контексте для предпросмотра
         context.user_data["current_assessment"] = test
         
-        # Форматируем тест для отображения
         formatted_test = format_test_for_display(test)
         
-        # Создаем клавиатуру с опциями
         keyboard = [
-            [InlineKeyboardButton("Регенерировать с комментарием", callback_data="regenerate_assessment")],
-            [InlineKeyboardButton("Сохранить тест", callback_data="save_assessment")],
-            [InlineKeyboardButton("Отменить", callback_data="cancel_assessment")]
+            [InlineKeyboardButton("Regenerate with comment", callback_data="regenerate_assessment")],
+            [InlineKeyboardButton("Save test", callback_data="save_assessment")],
+            [InlineKeyboardButton("Cancel", callback_data="cancel_assessment")]
         ]
         
         await message.edit_text(
-            f"📝 Сгенерированный тест по теме '{topic_name}':\n\n{formatted_test}",
+            f"📝 Generated test for topic '{topic_name}':\n\n{formatted_test}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         
         return REVIEW_ASSESSMENT
         
     except Exception as e:
-        logger.error(f"Ошибка генерации теста: {e}")
-        await message.edit_text("❌ Ошибка при генерации теста")
+        logger.error(f"Test generation error: {e}")
+        await message.edit_text("❌ Error generating test")
         return EDIT_TOPIC
 
 def format_test_for_display(test: Dict) -> str:
-    formatted = f"📚 Тема: {test['topic']}\n\n"
+    formatted = f"📚 Topic: {test['topic']}\n\n"
     for i, question in enumerate(test["questions"], 1):
         formatted += f"{i}. {question['question']}\n"
         for j, option in enumerate(question["options"]):
@@ -1201,10 +1118,8 @@ async def back_to_edit(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     await query.answer()
     
-    # Удаляем сообщение с подтверждением сохранения
     await query.delete_message()
     
-    # Показываем меню редактирования темы
     await show_topic_info(update, context)
     return EDIT_TOPIC
 
@@ -1217,38 +1132,33 @@ async def handle_assessment_actions(update: Update, context: CallbackContext) ->
     assessment_path = os.path.join(topic_dir, ASSESSMENT_FILENAME)
     
     if action == "regenerate_assessment":
-        # Сохраняем текущую версию теста перед регенерацией
         with open(assessment_path, "w", encoding="utf-8") as f:
             json.dump(context.user_data["current_assessment"], f, ensure_ascii=False, indent=2)
         
         await query.message.reply_text(
-            "Введите ваш комментарий для улучшения теста:",
+            "Enter your comment to improve the test:",
             reply_markup=ReplyKeyboardRemove()
         )
         return GENERATE_ASSESSMENT
         
     elif action == "save_assessment":
-        # Сохраняем тест в файл
         with open(assessment_path, "w", encoding="utf-8") as f:
             json.dump(context.user_data["current_assessment"], f, ensure_ascii=False, indent=2)
         
-        # Возвращаемся к редактированию темы
         await show_topic_info(update, context)
         return EDIT_TOPIC
         
     elif action == "cancel_assessment":
         try:
-            # Удаляем файл теста, если он существует
             if os.path.exists(assessment_path):
                 os.remove(assessment_path)
-                await query.message.reply_text("❌ Создание теста отменено, файл теста удалён.")
+                await query.message.reply_text("❌ Test creation canceled, test file deleted.")
             else:
-                await query.message.reply_text("❌ Создание теста отменено.")
+                await query.message.reply_text("❌ Test creation canceled.")
         except Exception as e:
-            logger.error(f"Ошибка при удалении теста: {e}")
-            await query.message.reply_text("❌ Ошибка при отмене теста.")
+            logger.error(f"Error canceling test: {e}")
+            await query.message.reply_text("❌ Error canceling test.")
         
-        # Возвращаемся к редактированию темы
         await show_topic_info(update, context)
         return EDIT_TOPIC
     
@@ -1256,33 +1166,28 @@ async def handle_assessment_actions(update: Update, context: CallbackContext) ->
         try:
             if os.path.exists(assessment_path):
                 os.remove(assessment_path)
-                await query.edit_message_text("✅ Тест успешно удалён!")
+                await query.edit_message_text("✅ Test successfully deleted!")
             else:
-                await query.edit_message_text("⚠️ Тест не найден, возможно уже удалён")
+                await query.edit_message_text("⚠️ Test not found, possibly already deleted")
             
-            # Возвращаемся к редактированию темы
             await show_topic_info(update, context)
             return EDIT_TOPIC
         except Exception as e:
-            logger.error(f"Ошибка при удалении теста: {e}")
-            await query.edit_message_text("❌ Ошибка при удалении теста")
+            logger.error(f"Error deleting test: {e}")
+            await query.edit_message_text("❌ Error deleting test")
             return REVIEW_ASSESSMENT
     
     elif action == "back_to_edit":
-        # Возвращаемся к редактированию темы
         await show_topic_info(update, context)
         return EDIT_TOPIC
     
     return REVIEW_ASSESSMENT
-
-
 
 async def regenerate_assessment_with_comment(update: Update, context: CallbackContext) -> int:
     user_comment = update.message.text
     topic_name = context.user_data["current_topic"]
     topic_dir = context.user_data["topic_dir"]
     
-    # Получаем текст PDF и выводы
     pdf_path = os.path.join(topic_dir, PDF_FILENAME)
     outcomes_path = os.path.join(topic_dir, OUTCOMES_FILENAME)
     assesment_path = os.path.join(topic_dir, ASSESSMENT_FILENAME)
@@ -1294,7 +1199,6 @@ async def regenerate_assessment_with_comment(update: Update, context: CallbackCo
         with open(outcomes_path, "r", encoding="utf-8") as f:
             outcomes_text = f.read()
         
-        # Формируем промпт с комментарием
         prompt = f"""
         Please review the test taking into account the following IMPORTANT user comment:
         {user_comment}
@@ -1303,7 +1207,7 @@ async def regenerate_assessment_with_comment(update: Update, context: CallbackCo
           "topic": "Topic Title",
           "questions": [
             {
-              "question": "Текст вопроса",
+              "question": "Question text",
               "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
               "correct": 0 (correct answer index),
               "explanation": "Brief explanation of the correct answer"
@@ -1319,75 +1223,68 @@ async def regenerate_assessment_with_comment(update: Update, context: CallbackCo
         Old test version:"{assesment_text}"
         """
         
-        # Генерируем новый тест
         response = await ask_gpt_for_assesments(
             pdf_text=pdf_text,
             outcomes_text=outcomes_text,
             additional_prompt=prompt
         )
         
-        # Очищаем и парсим ответ
         cleaned_response = response.strip().replace("```json", "").replace("```", "")
         test = json.loads(cleaned_response)
         context.user_data["current_assessment"] = test
         
-        # Показываем пересмотренный тест
         formatted_test = format_test_for_display(test)
         keyboard = [
-            [InlineKeyboardButton("Регенерировать с комментарием", callback_data="regenerate_assessment")],
-            [InlineKeyboardButton("Сохранить тест", callback_data="save_assessment")],
-            [InlineKeyboardButton("Отменить", callback_data="cancel_assessment")]
+            [InlineKeyboardButton("Regenerate with comment", callback_data="regenerate_assessment")],
+            [InlineKeyboardButton("Save test", callback_data="save_assessment")],
+            [InlineKeyboardButton("Cancel", callback_data="cancel_assessment")]
         ]
         
         await update.message.reply_text(
-            f"📝 Пересмотренный тест по теме '{topic_name}':\n\n{formatted_test}",
+            f"📝 Revised test for topic '{topic_name}':\n\n{formatted_test}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         
         return REVIEW_ASSESSMENT
         
     except Exception as e:
-        logger.error(f"Ошибка регенерации теста: {e}")
+        logger.error(f"Test regeneration error: {e}")
         await update.message.reply_text(
-            "❌ Ошибка при регенерации теста",
+            "❌ Error regenerating test",
             reply_markup=edit_options_keyboard
         )
         return EDIT_TOPIC
 
-
 async def delete_confirm(update: Update, context: CallbackContext) -> int:
     text = update.message.text
-    if text == "Да, удалить":
+    if text == "Yes, delete":
         topic_dir = context.user_data.get("topic_dir")
         try:
-            # Удаляем всю папку с документами
             if topic_dir and os.path.exists(topic_dir):
                 import shutil
                 shutil.rmtree(topic_dir)
             
             await update.message.reply_text(
-                "Документ и все связанные данные успешно удалены!",
+                "Document and all related data successfully deleted!",
                 reply_markup=auth_keyboard
             )
             
-
-            # Очищаем контекст
             context.user_data.pop("current_topic", None)
             context.user_data.pop("topic_dir", None)
             context.user_data.pop("gpt_response", None)
             
             return AUTHORIZED
         except Exception as e:
-            logger.error(f"Ошибка при удалении документа: {e}")
+            logger.error(f"Error deleting document: {e}")
             await update.message.reply_text(
-                "Произошла ошибка при удалении документа. Попробуйте еще раз.",
+                "Error deleting document. Please try again.",
                 reply_markup=edit_options_keyboard
             )
             await show_topic_info(update, context)
             return EDIT_TOPIC
     else:
         await update.message.reply_text(
-            "Удаление отменено.",
+            "Deletion canceled.",
             reply_markup=edit_options_keyboard
         )
         await show_topic_info(update, context)
@@ -1397,24 +1294,20 @@ async def edit_topic_name(update: Update, context: CallbackContext) -> int:
     new_topic_name = sanitize_topic_name(update.message.text)
     old_topic_dir = context.user_data["topic_dir"]
     
-    
-
     topic_dir, was_renamed = get_unique_topic_dir(TOPICS_DIR, new_topic_name)
     if was_renamed:
         new_new_topic_name = os.path.basename(topic_dir)
         await update.message.reply_text(
-            f"Тема с названием '{new_topic_name}' уже существует. "
-            f"Будет использовано имя '{new_new_topic_name}'"
+            f"Topic with name '{new_topic_name}' already exists. "
+            f"Will use name '{new_new_topic_name}'"
         )
         new_topic_name = new_new_topic_name
     
     new_topic_dir = topic_dir
     
     try:
-        # Переименовываем только папку, файлы внутри остаются с теми же именами
         os.rename(old_topic_dir, new_topic_dir)
         
-        # Обновляем информацию в context
         context.user_data["current_topic"] = new_topic_name
         context.user_data["topic_dir"] = new_topic_dir
         
@@ -1423,45 +1316,43 @@ async def edit_topic_name(update: Update, context: CallbackContext) -> int:
     except Exception as e:
         logger.error(f"Error renaming topic: {e}")
         await update.message.reply_text(
-            "Ошибка при изменении названия темы. Попробуйте еще раз.",
+            "Error changing topic name. Please try again.",
             reply_markup=edit_options_keyboard
         )
         return EDIT_TOPIC
 
-
 async def edit_conclusions(update: Update, context: CallbackContext) -> int:
     text = update.message.text
-    if text == "Переписать выводы":
+    if text == "Rewrite learning outcomes":
         await update.message.reply_text(
-            "Введите новые выводы (желательно пронумерованный список выводов):",
+            "Enter new learning outcomes (preferably a numbered list):",
             reply_markup=ReplyKeyboardRemove()
         )
         return REWRITE_CONCLUSIONS
-    elif text == "Регенерировать с комментарием":
+    elif text == "Regenerate with comment":
         await update.message.reply_text(
-            "Введите ваш комментарий для улучшения выводов:",
+            "Enter your comment to improve learning outcomes:",
             reply_markup=ReplyKeyboardRemove()
         )
         return ADD_COMMENT
-    elif text == "Назад":
+    elif text == "Back":
         await show_topic_info(update, context)
         await update.message.reply_text(
-            "Выберите действие:",
+            "Choose action:",
             reply_markup=edit_options_keyboard
         )
         return EDIT_TOPIC
     else:
         await update.message.reply_text(
-            "Пожалуйста, используйте кнопки для выбора действия",
+            "Please use buttons to choose action",
             reply_markup=edit_conclusions_keyboard
         )
         return EDIT_CONCLUSIONS
 
-
 async def rewrite_conclusions(update: Update, context: CallbackContext) -> int:
     if not update.message.text:
         await update.message.reply_text(
-            "Пожалуйста, введите текст выводов",
+            "Please enter learning outcomes text",
             reply_markup=edit_conclusions_keyboard
         )
         return REWRITE_CONCLUSIONS
@@ -1471,24 +1362,21 @@ async def rewrite_conclusions(update: Update, context: CallbackContext) -> int:
     response_path = os.path.join(topic_dir, OUTCOMES_FILENAME)
     
     try:
-        # Читаем текущие выводы, чтобы сохранить название темы (первая строка)
         with open(response_path, "r", encoding="utf-8") as f:
-            old_content = f.read().split('\n', 1)  # Разделяем на первую строку и остальное
+            old_content = f.read().split('\n', 1)
             topic_title = old_content[0] if len(old_content) > 0 else "Untitled"
         
-        # Сохраняем новые выводы с сохранением оригинального названия темы
         with open(response_path, "w", encoding="utf-8") as f:
             f.write(f"{topic_title}\n{new_conclusions}")
         
-        # Обновляем данные в контексте
         context.user_data["gpt_response"] = f"{topic_title}\n{new_conclusions}"
         
         await show_topic_info(update, context)
         return EDIT_TOPIC
     except Exception as e:
-        logger.error(f"Ошибка при перезаписи выводов: {e}")
+        logger.error(f"Error rewriting learning outcomes: {e}")
         await update.message.reply_text(
-            "Произошла ошибка при сохранении выводов. Попробуйте еще раз.",
+            "Error saving learning outcomes. Please try again.",
             reply_markup=edit_conclusions_keyboard
         )
         return EDIT_CONCLUSIONS
@@ -1499,10 +1387,8 @@ async def add_comment(update: Update, context: CallbackContext) -> int:
     pdf_path = os.path.join(topic_dir, PDF_FILENAME)
     
     try:
-        # Извлекаем текст из PDF
         pdf_text = extract_text_from_pdf(pdf_path)
         
-        # Формируем промпт с комментарием пользователя
         additional_prompt = (
             f"User comment: {user_comment}\n\n"
             "Please regenerate the learning outcomes list based on the document and this comment. "
@@ -1510,11 +1396,9 @@ async def add_comment(update: Update, context: CallbackContext) -> int:
             "Answer in the same language as the document."
         )
         
-        # Отправляем в GPT
-        await update.message.reply_text("Регенерирую выводы с учетом вашего комментария...")
+        await update.message.reply_text("Regenerating learning outcomes with your comment...")
         gpt_response = await ask_gpt(pdf_text, additional_prompt)
         
-        # Обновляем ответ GPT
         context.user_data["gpt_response"] = gpt_response
         response_filename = os.path.join(topic_dir, OUTCOMES_FILENAME)
         
@@ -1524,19 +1408,18 @@ async def add_comment(update: Update, context: CallbackContext) -> int:
         await show_topic_info(update, context)
         return EDIT_TOPIC
     except Exception as e:
-        logger.error(f"Error regenerating conclusions: {e}")
+        logger.error(f"Error regenerating learning outcomes: {e}")
         await update.message.reply_text(
-            "Ошибка при регенерации выводов. Попробуйте еще раз.",
+            "Error regenerating learning outcomes. Please try again.",
             reply_markup=edit_conclusions_keyboard
         )
         return EDIT_CONCLUSIONS
 
 async def cancel(update: Update, context: CallbackContext) -> int:
-    # Очищаем временные файлы при отмене
     if "temp_pdf_path" in context.user_data and os.path.exists(context.user_data["temp_pdf_path"]):
         os.remove(context.user_data["temp_pdf_path"])
     context.user_data.clear()
-    await update.message.reply_text("Сессия сброшена.", reply_markup=main_keyboard)
+    await update.message.reply_text("Session reset.", reply_markup=main_keyboard)
     return ConversationHandler.END
 
 def main() -> None:
