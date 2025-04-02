@@ -4,3 +4,6 @@ passlib[bcrypt]
 firebase-admin
 google-cloud-firestore
 python-telegram-bot
+openai
+PyPDF2
+requests
