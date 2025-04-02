@@ -24,8 +24,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 API_BASE_URL = "http://localhost:8000"
-BOT_TOKEN = "7266424537:AAG7T8KReTaDvxsYq84FZuZce6L1nwwg7S0"
-OPENAI_API_KEY = "key"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 (
     CHOOSING, REGISTER_NAME, REGISTER_PASS, LOGIN_NAME, LOGIN_PASS, 
