@@ -613,7 +613,7 @@ async def ask_gpt(pdf_text: str, additional_prompt: str = "") -> str:
         prompt = f'{additional_prompt} Document is next:\n\n"{pdf_text}"\n\n'
         
         response = openai_client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are an assistant in identifying learning outcomes that a student can read after reading the document."},
                 {"role": "user", "content": prompt}
@@ -867,7 +867,7 @@ async def ask_gpt_for_assesments(pdf_text: str, outcomes_text: str, additional_p
         prompt = f'{additional_prompt}\n Document is next:\n\n"{pdf_text}"\n\nOutcomes are next:\n\n"{outcomes_text}"\n\n'
         
         response = openai_client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are an assistant in creating simple multiple choice tests using source document of the course and learning outcomes."},
                 {"role": "user", "content": prompt}
